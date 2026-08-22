@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"testing"
+
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockcache"
 )
 
 func TestWriteAndReadBlock(t *testing.T) {
@@ -11,7 +13,8 @@ func TestWriteAndReadBlock(t *testing.T) {
 	tmpFile := "test_blocks.bin"
 	defer os.Remove(tmpFile)
 
-	bm := NewBlockManager(4096)
+	cache := blockcache.NewBlockCache(10) //10 blokova kapaciteta za test
+	bm := NewBlockManager(4096, cache)
 
 	original := []byte("Zdravo, ovo je test bloka!")
 

@@ -4,23 +4,30 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockcache"
 )
 
 //Jedini sloj u sistemu koji sme direktno da cita/pise fajlove na disku
 
 type BlockManager struct {
 	blockSize int //velicina jednog bloka u B(4096,8192 ili 16384)
+	cache     *blockcache.BlockCache
 }
 
 // Pravi novi BlockManager sa zadatom velicinom bloka
-func NewBlockManager(blockSize int) *BlockManager {
-	return &BlockManager{blockSize: blockSize}
+func NewBlockManager(blockSize int, cache *blockcache.BlockCache) *BlockManager {
+	return &BlockManager{blockSize: blockSize, cache: cache}
 }
 
 // ReadBlock cita tacno jedan blok(blockSize bajtova) iz fajla na datoj putanji
 // blockNumber je redni broj bloka(0,1,2,...)
 func (bm *BlockManager) ReadBlock(path string, blockNumber int64) ([]byte, error) {
-	//otvaramo fajl samo za citanje
+	//1. Prvo pitamo kes
+	if data, found := bm.cache.Get(path, blockNumber); found {
+		return data, nil
+	}
+	//kes-miss,moramo na disk
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("Ne mogu da otvorim fajl %s:%w", path, err)
@@ -47,6 +54,8 @@ func (bm *BlockManager) ReadBlock(path string, blockNumber int64) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("Ne mogu da procitam blok %d:%w", blockNumber, err)
 	}
+
+	//upisujemo u kes za naredni put PRE nego sto vratimo rezultat
 	return buffer, nil
 
 }
@@ -81,7 +90,10 @@ func (bm *BlockManager) WriteBlock(path string, blockNumber int64, data []byte) 
 
 	_, err = file.Write(paddedBlock)
 	if err != nil {
-		return fmt.Errorf("ne mogu da upišem blok %d: %w", blockNumber, err)
+		return fmt.Errorf("Ne mogu da upišem blok %d: %w", blockNumber, err)
 	}
+	//Azuriramo kes sa paddovanim sadrzajem-identican onome na disku(kad bi neko citao blok, da se poklapa sa diskom)
+	bm.cache.Put(path, blockNumber, paddedBlock)
+
 	return nil
 }
