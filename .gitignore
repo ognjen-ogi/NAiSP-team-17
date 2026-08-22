@@ -1,0 +1,15 @@
+# Binarni fajlovi
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
