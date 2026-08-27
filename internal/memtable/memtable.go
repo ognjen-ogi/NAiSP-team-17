@@ -80,12 +80,33 @@ type Memtable struct {
 
 }
 
-// NewMemtable pravi novu praznu Memtable. sizeLimitType i sizeLimit dolaze iz
-// konfiguracije (korisnik bira da li je limit broj elemenata ili KB)
+// StructureType odredjuje koja konkretna struktura podataka se koristi ispod
+// Memtable-a. Korisnik bira preko konfiguracije (DZ1 iz specifikacije)
+type StructureType string
 
-func NewMemtable(sizeLimitType SizeLimitType, sizeLimit int) *Memtable {
+const (
+	StructureHashMap  StructureType = "hashmap"
+	StructureSkipList StructureType = "skiplist"
+	//StructureBTree  ce biti dodat kada implementiramo B-stablo
+)
+
+// NewMemtable pravi novu praznu Memtable. sizeLimitType i sizeLimit dolaze iz
+// konfiguracije (korisnik bira da li je limit broj elemenata ili KB).
+// structureType bira konkretnu strukturu podataka ispod (DZ1)
+func NewMemtable(sizeLimitType SizeLimitType, sizeLimit int, structureType StructureType) *Memtable {
+	var store keyValueStore
+
+	switch structureType {
+	case StructureSkipList:
+		store = newSkipListStore()
+	case StructureHashMap:
+		store = newHashMapStore()
+	default:
+		//Podrazumevano,ako konfiguracija ne navede nista-hashMapa je najjednostavnija i uvek dostupna
+		store = newHashMapStore()
+	}
 	return &Memtable{
-		store:         newHashMapStore(),
+		store:         store,
 		sizeLimitType: sizeLimitType,
 		sizeLimit:     sizeLimit,
 	}

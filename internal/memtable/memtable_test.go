@@ -6,7 +6,7 @@ import (
 )
 
 func TestPutAndGet(t *testing.T) {
-	m := NewMemtable(SizeLimitCount, 100)
+	m := NewMemtable(SizeLimitCount, 100, StructureHashMap)
 
 	m.Put("kljuc1", []byte("vrednost1"))
 
@@ -23,7 +23,7 @@ func TestPutAndGet(t *testing.T) {
 }
 
 func TestDeleteCreatesTombstone(t *testing.T) {
-	m := NewMemtable(SizeLimitCount, 100)
+	m := NewMemtable(SizeLimitCount, 100, StructureHashMap)
 
 	m.Put("kljuc1", []byte("vrednost1"))
 	m.Delete("kljuc1")
@@ -41,7 +41,7 @@ func TestDeleteCreatesTombstone(t *testing.T) {
 }
 
 func TestGetNonexistentKey(t *testing.T) {
-	m := NewMemtable(SizeLimitCount, 100)
+	m := NewMemtable(SizeLimitCount, 100, StructureHashMap)
 
 	_, _, found := m.Get("nepostojeci")
 	if found {
@@ -50,7 +50,7 @@ func TestGetNonexistentKey(t *testing.T) {
 }
 
 func TestIsFullByCount(t *testing.T) {
-	m := NewMemtable(SizeLimitCount, 2)
+	m := NewMemtable(SizeLimitCount, 2, StructureHashMap)
 
 	m.Put("a", []byte("1"))
 	if m.IsFull() {
@@ -64,7 +64,7 @@ func TestIsFullByCount(t *testing.T) {
 }
 
 func TestFlushReturnsSortedRecords(t *testing.T) {
-	m := NewMemtable(SizeLimitCount, 100)
+	m := NewMemtable(SizeLimitCount, 100, StructureHashMap)
 
 	// Namerno ubacujemo van sortiranog redosleda.
 	m.Put("banana", []byte("2"))
@@ -77,6 +77,39 @@ func TestFlushReturnsSortedRecords(t *testing.T) {
 		t.Fatalf("Ocekivano 3 zapisa, dobijeno %d", len(records))
 	}
 
+	expectedOrder := []string{"banana", "jabuka", "visnja"}
+	for i, expectedKey := range expectedOrder {
+		if records[i].Key != expectedKey {
+			t.Fatalf("Na poziciji %d ocekivan kljuc %s, dobijen %s", i, expectedKey, records[i].Key)
+		}
+	}
+}
+
+func TestSkipListStoreBehavesLikeHashMap(t *testing.T) {
+	m := NewMemtable(SizeLimitCount, 100, StructureSkipList)
+
+	m.Put("banana", []byte("2"))
+	m.Put("jabuka", []byte("1"))
+	m.Put("visnja", []byte("3"))
+	m.Delete("banana")
+
+	// Proveravamo da je jabuka i dalje tu
+	value, tombstone, found := m.Get("jabuka")
+	if !found || tombstone || string(value) != "1" {
+		t.Fatal("Skip lista: jabuka treba da postoji sa vrednoscu '1'")
+	}
+
+	// Proveravamo da je banana tombstone (obrisana)
+	_, tombstone, found = m.Get("banana")
+	if !found || !tombstone {
+		t.Fatal("Skip lista: banana treba da bude tombstone")
+	}
+
+	// Proveravamo da je Flush i dalje sortiran
+	records := m.Flush()
+	if len(records) != 3 {
+		t.Fatalf("Ocekivano 3 zapisa (ukljucujuci tombstone), dobijeno %d", len(records))
+	}
 	expectedOrder := []string{"banana", "jabuka", "visnja"}
 	for i, expectedKey := range expectedOrder {
 		if records[i].Key != expectedKey {
