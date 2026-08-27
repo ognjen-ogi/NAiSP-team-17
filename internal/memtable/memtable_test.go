@@ -117,3 +117,39 @@ func TestSkipListStoreBehavesLikeHashMap(t *testing.T) {
 		}
 	}
 }
+
+func TestBTreeStoreBehavesLikeHashMap(t *testing.T) {
+	m := NewMemtable(SizeLimitCount, 100, StructureBTree)
+
+	// Ubacujemo dovoljno kljuceva da izazovemo BAR jedan split (t=3 znaci
+	// da cvor prekoracuje limit posle 5 kljuceva u istom cvoru).
+	keys := []string{"k5", "k3", "k8", "k1", "k9", "k2", "k7", "k4", "k6"}
+	for i, k := range keys {
+		m.Put(k, []byte{byte(i)})
+	}
+
+	m.Delete("k5")
+
+	// Proveravamo da je k3 i dalje tu.
+	value, tombstone, found := m.Get("k3")
+	if !found || tombstone || len(value) == 0 {
+		t.Fatal("B-stablo: k3 treba da postoji")
+	}
+
+	// Proveravamo da je k5 tombstone.
+	_, tombstone, found = m.Get("k5")
+	if !found || !tombstone {
+		t.Fatal("B-stablo: k5 treba da bude tombstone")
+	}
+
+	// Proveravamo da je Flush sortiran (kljucevi k1...k9 abecedno).
+	records := m.Flush()
+	if len(records) != 9 {
+		t.Fatalf("Ocekivano 9 zapisa, dobijeno %d", len(records))
+	}
+	for i := 1; i < len(records); i++ {
+		if records[i-1].Key >= records[i].Key {
+			t.Fatalf("Zapisi nisu sortirani: %s pre %s", records[i-1].Key, records[i].Key)
+		}
+	}
+}

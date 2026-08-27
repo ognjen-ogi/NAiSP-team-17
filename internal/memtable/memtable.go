@@ -87,7 +87,7 @@ type StructureType string
 const (
 	StructureHashMap  StructureType = "hashmap"
 	StructureSkipList StructureType = "skiplist"
-	//StructureBTree  ce biti dodat kada implementiramo B-stablo
+	StructureBTree    StructureType = "btree"
 )
 
 // NewMemtable pravi novu praznu Memtable. sizeLimitType i sizeLimit dolaze iz
@@ -99,6 +99,8 @@ func NewMemtable(sizeLimitType SizeLimitType, sizeLimit int, structureType Struc
 	switch structureType {
 	case StructureSkipList:
 		store = newSkipListStore()
+	case StructureBTree:
+		store = newBTreeStore()
 	case StructureHashMap:
 		store = newHashMapStore()
 	default:
