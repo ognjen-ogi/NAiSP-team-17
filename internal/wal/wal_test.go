@@ -2,8 +2,13 @@ package wal
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"path/filepath"
 	"testing"
+
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockcache"
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockmanager"
 )
 
 func TestRecord(t *testing.T) {
@@ -107,4 +112,86 @@ func TestWALPosition(t *testing.T) {
 		w.currentPosition.Offset != 0 {
 		t.Fatal("nismo se prebacili na drugi segment a morali smo")
 	}
+}
+
+func TestWALAppend(t *testing.T) {
+	const blockSize = 4096
+
+	cache := blockcache.NewBlockCache(10)
+	bm := blockmanager.NewBlockManager(blockSize, cache)
+
+	w, err := NewWAL(t.TempDir(), bm, blockSize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	record := Record{
+		Timestamp: 123456789,
+		Key:       "key",
+		Value:     bytes.Repeat([]byte("x"), 9000),
+	}
+
+	fmt.Printf("Originalna zapis: %+v\n", record)
+
+	position, err := w.Append(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	types := []FragmentType{
+		FragmentFirst,
+		FragmentMiddle,
+		FragmentLast,
+	}
+
+	var recordData []byte
+
+	for i, fragmentType := range types {
+		segment := 1
+		block := int64(i)
+
+		if i == 2 {
+			segment = 2
+			block = 0
+		}
+
+		data, err := bm.ReadBlock(w.segmentPath(segment), block)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		size := binary.LittleEndian.Uint16(data[4:6])
+
+		fragment, err := deserializeFragment(
+			data[:fragmentHeaderSize+int(size)],
+		)
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if fragment.Type != fragmentType {
+			t.Fatal("neispravan fragment type")
+		}
+
+		recordData = append(recordData, fragment.Payload...)
+	}
+
+	result, err := deserializeRecord(recordData)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Timestamp != record.Timestamp ||
+		result.Key != record.Key ||
+		!bytes.Equal(result.Value, record.Value) {
+		t.Fatal("WAL zapisi se ne poklapaju")
+	}
+
+	if position.SegmentNumber != 2 ||
+		position.BlockNumber != 0 {
+		t.Fatal("nepravilna pozicija WAL")
+	}
+
+	fmt.Printf("Desereliazovana zapis: %+v\n", result)
 }

@@ -2,6 +2,7 @@ package wal
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockmanager"
@@ -22,7 +23,7 @@ type WAL struct {
 	currentBlock      []byte
 }
 
-func newWAL(
+func NewWAL(
 	directory string,
 	blockManager *blockmanager.BlockManager,
 	blockSize int,
@@ -40,6 +41,10 @@ func newWAL(
 		return nil, fmt.Errorf("neispravan segment block count")
 	}
 
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		return nil, err
+	}
+
 	return &WAL{
 		directory:         directory,
 		blockManager:      blockManager,
@@ -52,6 +57,69 @@ func newWAL(
 		},
 		currentBlock: make([]byte, blockSize),
 	}, nil
+}
+
+func (w *WAL) Append(record Record) (Position, error) {
+	data := serializeRecord(record)
+	written := 0
+
+	for written < len(data) {
+		remaining := w.blockSize - w.currentPosition.Offset
+
+		if remaining < fragmentHeaderSize+1 {
+			w.advanceBlock()
+			remaining = w.blockSize
+		}
+
+		payloadSize := remaining - fragmentHeaderSize
+		left := len(data) - written
+
+		if left < payloadSize {
+			payloadSize = left
+		}
+
+		fragmentType := chooseFragmentType(
+			written,
+			payloadSize,
+			len(data),
+		)
+
+		fragment, err := serializeFragment(
+			fragmentType,
+			data[written:written+payloadSize],
+		)
+
+		if err != nil {
+			return Position{}, err
+		}
+
+		copy(
+			w.currentBlock[w.currentPosition.Offset:],
+			fragment,
+		)
+
+		w.currentPosition.Offset += len(fragment)
+		written += payloadSize
+
+		if err := w.persistCurrentBlock(); err != nil {
+			return Position{}, err
+		}
+
+		if w.currentPosition.Offset == w.blockSize ||
+			w.blockSize-w.currentPosition.Offset < fragmentHeaderSize+1 {
+			w.advanceBlock()
+		}
+	}
+
+	return w.currentPosition, nil
+}
+
+func (w *WAL) persistCurrentBlock() error {
+	return w.blockManager.WriteBlock(
+		w.segmentPath(w.currentPosition.SegmentNumber),
+		w.currentPosition.BlockNumber,
+		w.currentBlock,
+	)
 }
 
 func (w *WAL) segmentPath(segmentNumber int) string {

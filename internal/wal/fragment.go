@@ -93,3 +93,22 @@ func validFragmentType(fragmentType FragmentType) bool {
 		fragmentType == FragmentMiddle ||
 		fragmentType == FragmentLast
 }
+
+func chooseFragmentType(written int, payloadSize int, totalSize int) FragmentType {
+	first := written == 0
+	last := written+payloadSize == totalSize
+
+	if first && last {
+		return FragmentFull
+	}
+
+	if first {
+		return FragmentFirst
+	}
+
+	if last {
+		return FragmentLast
+	}
+
+	return FragmentMiddle
+}
