@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockmanager"
 )
@@ -21,6 +24,11 @@ type WAL struct {
 	segmentBlockCount int64
 	currentPosition   Position
 	currentBlock      []byte
+}
+
+type segmentInfo struct {
+	number int
+	path   string
 }
 
 func NewWAL(
@@ -129,6 +137,45 @@ func (w *WAL) segmentPath(segmentNumber int) string {
 	)
 }
 
+func (w *WAL) listSegments() ([]segmentInfo, error) {
+	entries, err := os.ReadDir(w.directory)
+	if err != nil {
+		return nil, err
+	}
+
+	var segments []segmentInfo
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+
+		if !strings.HasPrefix(name, "wal_") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+
+		numberString := strings.TrimSuffix(strings.TrimPrefix(name, "wal_"), ".log")
+
+		number, err := strconv.Atoi(numberString)
+		if err != nil {
+			continue
+		}
+
+		segments = append(segments, segmentInfo{
+			number: number,
+			path:   filepath.Join(w.directory, name),
+		})
+	}
+
+	sort.Slice(segments, func(i, j int) bool {
+		return segments[i].number < segments[j].number
+	})
+
+	return segments, nil
+}
+
 func (w *WAL) advanceBlock() {
 	w.currentPosition.BlockNumber++
 	w.currentPosition.Offset = 0
@@ -138,4 +185,94 @@ func (w *WAL) advanceBlock() {
 		w.currentPosition.SegmentNumber++
 		w.currentPosition.BlockNumber = 0
 	}
+}
+
+func (w *WAL) Replay(apply func(Record) error) error {
+	segments, err := w.listSegments()
+	if err != nil {
+		return err
+	}
+
+	var recordData []byte
+	assembling := false
+
+	for _, segment := range segments {
+		info, err := os.Stat(segment.path)
+		if err != nil {
+			return err
+		}
+
+		blockCount := info.Size() / int64(w.blockSize)
+
+		for blockNumber := int64(0); blockNumber < blockCount; blockNumber++ {
+			block, err := w.blockManager.ReadBlock(
+				segment.path,
+				blockNumber,
+			)
+
+			if err != nil {
+				return err
+			}
+
+			fragments, err := parseBlock(block)
+			if err != nil {
+				return err
+			}
+
+			for _, fragment := range fragments {
+				switch fragment.Type {
+				case FragmentFull:
+					record, err := deserializeRecord(fragment.Payload)
+					if err != nil {
+						return err
+					}
+
+					if err := apply(record); err != nil {
+						return err
+					}
+
+				case FragmentFirst:
+					recordData = append(
+						recordData[:0],
+						fragment.Payload...,
+					)
+					assembling = true
+
+				case FragmentMiddle:
+					if !assembling {
+						return fmt.Errorf("MIDDLE fragment bez FIRST fragmenta")
+					}
+
+					recordData = append(
+						recordData,
+						fragment.Payload...,
+					)
+
+				case FragmentLast:
+					if !assembling {
+						return fmt.Errorf("LAST fragment bez FIRST fragmenta")
+					}
+
+					recordData = append(
+						recordData,
+						fragment.Payload...,
+					)
+
+					record, err := deserializeRecord(recordData)
+					if err != nil {
+						return err
+					}
+
+					if err := apply(record); err != nil {
+						return err
+					}
+
+					recordData = recordData[:0]
+					assembling = false
+				}
+			}
+		}
+	}
+
+	return nil
 }

@@ -195,3 +195,63 @@ func TestWALAppend(t *testing.T) {
 
 	fmt.Printf("Desereliazovana zapis: %+v\n", result)
 }
+
+func TestWALReplay(t *testing.T) {
+	const blockSize = 4096
+
+	cache := blockcache.NewBlockCache(10)
+	bm := blockmanager.NewBlockManager(blockSize, cache)
+
+	w, err := NewWAL(t.TempDir(), bm, blockSize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records := []Record{
+		{
+			Timestamp: 100,
+			Key:       "first",
+			Value:     []byte("one"),
+		},
+		{
+			Timestamp: 200,
+			Key:       "second",
+			Value:     bytes.Repeat([]byte("x"), 9000),
+		},
+		{
+			Timestamp: 300,
+			Tombstone: true,
+			Key:       "third",
+		},
+	}
+
+	for _, record := range records {
+		if _, err := w.Append(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var restored []Record
+
+	err = w.Replay(func(record Record) error {
+		restored = append(restored, record)
+		return nil
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(restored) != len(records) {
+		t.Fatal("neispravan broj obnovljenih WAL zapisa")
+	}
+
+	for i := range records {
+		if restored[i].Timestamp != records[i].Timestamp ||
+			restored[i].Tombstone != records[i].Tombstone ||
+			restored[i].Key != records[i].Key ||
+			!bytes.Equal(restored[i].Value, records[i].Value) {
+			t.Fatal("obnovljeni WAL zapis nije ispravan")
+		}
+	}
+}

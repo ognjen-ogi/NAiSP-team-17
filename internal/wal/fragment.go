@@ -112,3 +112,41 @@ func chooseFragmentType(written int, payloadSize int, totalSize int) FragmentTyp
 
 	return FragmentMiddle
 }
+
+func parseBlock(block []byte) ([]Fragment, error) {
+	var fragments []Fragment
+	offset := 0
+
+	for offset < len(block) {
+		remaining := len(block) - offset
+
+		if remaining < fragmentHeaderSize {
+			break
+		}
+
+		size := binary.LittleEndian.Uint16(block[offset+4 : offset+6])
+
+		if size == 0 {
+			break
+		}
+
+		fragmentSize := fragmentHeaderSize + int(size)
+
+		if fragmentSize > remaining {
+			return nil, fmt.Errorf("fragment prelazi granicu bloka")
+		}
+
+		fragment, err := deserializeFragment(
+			block[offset : offset+fragmentSize],
+		)
+
+		if err != nil {
+			return nil, err
+		}
+
+		fragments = append(fragments, fragment)
+		offset += fragmentSize
+	}
+
+	return fragments, nil
+}
