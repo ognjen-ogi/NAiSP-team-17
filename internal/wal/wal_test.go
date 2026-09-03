@@ -255,3 +255,67 @@ func TestWALReplay(t *testing.T) {
 		}
 	}
 }
+
+func TestWALRestart(t *testing.T) {
+	const blockSize = 4096
+
+	directory := t.TempDir()
+
+	cache1 := blockcache.NewBlockCache(10)
+	bm1 := blockmanager.NewBlockManager(blockSize, cache1)
+
+	w1, err := NewWAL(directory, bm1, blockSize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := Record{
+		Timestamp: 100,
+		Key:       "first",
+		Value:     bytes.Repeat([]byte("x"), 9000),
+	}
+
+	position, err := w1.Append(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache2 := blockcache.NewBlockCache(10)
+	bm2 := blockmanager.NewBlockManager(blockSize, cache2)
+
+	w2, err := NewWAL(directory, bm2, blockSize, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if w2.currentPosition != position {
+		t.Fatal("pozicija WAL-a nije pravilno obnovljena")
+	}
+
+	second := Record{
+		Timestamp: 200,
+		Key:       "second",
+		Value:     []byte("two"),
+	}
+
+	if _, err := w2.Append(second); err != nil {
+		t.Fatal(err)
+	}
+
+	var restored []Record
+
+	err = w2.Replay(func(record Record) error {
+		restored = append(restored, record)
+		return nil
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(restored) != 2 ||
+		restored[0].Key != first.Key ||
+		restored[1].Key != second.Key {
+		t.Fatal("WAL zapisi nisu pravilno obnovljeni nakon ponovnog pokretanja")
+	}
+}

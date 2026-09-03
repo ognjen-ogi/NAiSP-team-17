@@ -53,7 +53,7 @@ func NewWAL(
 		return nil, err
 	}
 
-	return &WAL{
+	w := &WAL{
 		directory:         directory,
 		blockManager:      blockManager,
 		blockSize:         blockSize,
@@ -64,7 +64,13 @@ func NewWAL(
 			Offset:        0,
 		},
 		currentBlock: make([]byte, blockSize),
-	}, nil
+	}
+
+	if err := w.restoreWritePosition(); err != nil {
+		return nil, err
+	}
+
+	return w, nil
 }
 
 func (w *WAL) Append(record Record) (Position, error) {
@@ -272,6 +278,75 @@ func (w *WAL) Replay(apply func(Record) error) error {
 				}
 			}
 		}
+	}
+
+	return nil
+}
+
+func (w *WAL) restoreWritePosition() error {
+	segments, err := w.listSegments()
+	if err != nil {
+		return err
+	}
+
+	if len(segments) == 0 {
+		return nil
+	}
+
+	lastSegment := segments[len(segments)-1]
+
+	info, err := os.Stat(lastSegment.path)
+	if err != nil {
+		return err
+	}
+
+	if info.Size()%int64(w.blockSize) != 0 {
+		return fmt.Errorf("veličina WAL segmenta nije deljiva sa block size")
+	}
+
+	blockCount := info.Size() / int64(w.blockSize)
+
+	if blockCount > w.segmentBlockCount {
+		return fmt.Errorf("WAL segment ima više blokova nego što je dozvoljeno")
+	}
+
+	if blockCount == 0 {
+		w.currentPosition.SegmentNumber = lastSegment.number
+		return nil
+	}
+
+	lastBlockNumber := blockCount - 1
+
+	block, err := w.blockManager.ReadBlock(
+		lastSegment.path,
+		lastBlockNumber,
+	)
+	if err != nil {
+		return err
+	}
+
+	fragments, err := parseBlock(block)
+	if err != nil {
+		return err
+	}
+
+	used := 0
+
+	for _, fragment := range fragments {
+		used += fragmentHeaderSize + int(fragment.Size)
+	}
+
+	w.currentPosition = Position{
+		SegmentNumber: lastSegment.number,
+		BlockNumber:   lastBlockNumber,
+		Offset:        used,
+	}
+
+	w.currentBlock = append([]byte(nil), block...)
+
+	if used == w.blockSize ||
+		w.blockSize-used < fragmentHeaderSize+1 {
+		w.advanceBlock()
 	}
 
 	return nil
