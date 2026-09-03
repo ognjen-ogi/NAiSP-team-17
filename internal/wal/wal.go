@@ -201,6 +201,7 @@ func (w *WAL) Replay(apply func(Record) error) error {
 
 	var recordData []byte
 	assembling := false
+	skipOrphanFragments := len(segments) > 0 && segments[0].number > 1
 
 	for _, segment := range segments {
 		info, err := os.Stat(segment.path)
@@ -228,6 +229,12 @@ func (w *WAL) Replay(apply func(Record) error) error {
 			for _, fragment := range fragments {
 				switch fragment.Type {
 				case FragmentFull:
+					if assembling {
+						return fmt.Errorf("FULL fragment pronadjen pre zavrsetka prethodnog zapisa")
+					}
+
+					skipOrphanFragments = false
+
 					record, err := deserializeRecord(fragment.Payload)
 					if err != nil {
 						return err
@@ -238,31 +245,36 @@ func (w *WAL) Replay(apply func(Record) error) error {
 					}
 
 				case FragmentFirst:
-					recordData = append(
-						recordData[:0],
-						fragment.Payload...,
-					)
+					if assembling {
+						return fmt.Errorf("FIRST fragment pronadjen pre zavrsetka prethodnog zapisa")
+					}
+
+					skipOrphanFragments = false
+					recordData = append(recordData[:0], fragment.Payload...)
 					assembling = true
 
 				case FragmentMiddle:
 					if !assembling {
+						if skipOrphanFragments {
+							continue
+						}
+
 						return fmt.Errorf("MIDDLE fragment bez FIRST fragmenta")
 					}
 
-					recordData = append(
-						recordData,
-						fragment.Payload...,
-					)
+					recordData = append(recordData, fragment.Payload...)
 
 				case FragmentLast:
 					if !assembling {
+						if skipOrphanFragments {
+							skipOrphanFragments = false
+							continue
+						}
+
 						return fmt.Errorf("LAST fragment bez FIRST fragmenta")
 					}
 
-					recordData = append(
-						recordData,
-						fragment.Payload...,
-					)
+					recordData = append(recordData, fragment.Payload...)
 
 					record, err := deserializeRecord(recordData)
 					if err != nil {
@@ -275,6 +287,7 @@ func (w *WAL) Replay(apply func(Record) error) error {
 
 					recordData = recordData[:0]
 					assembling = false
+					skipOrphanFragments = false
 				}
 			}
 		}
@@ -301,13 +314,13 @@ func (w *WAL) restoreWritePosition() error {
 	}
 
 	if info.Size()%int64(w.blockSize) != 0 {
-		return fmt.Errorf("veličina WAL segmenta nije deljiva sa block size")
+		return fmt.Errorf("velicina WAL segmenta nije deljiva sa block size")
 	}
 
 	blockCount := info.Size() / int64(w.blockSize)
 
 	if blockCount > w.segmentBlockCount {
-		return fmt.Errorf("WAL segment ima više blokova nego što je dozvoljeno")
+		return fmt.Errorf("WAL segment ima vise blokova nego stoo je dozvoljeno")
 	}
 
 	if blockCount == 0 {
@@ -347,6 +360,30 @@ func (w *WAL) restoreWritePosition() error {
 	if used == w.blockSize ||
 		w.blockSize-used < fragmentHeaderSize+1 {
 		w.advanceBlock()
+	}
+
+	return nil
+}
+
+func (w *WAL) DeleteSegmentsBefore(lowWaterMark Position) error {
+	if lowWaterMark.SegmentNumber < 1 ||
+		lowWaterMark.SegmentNumber > w.currentPosition.SegmentNumber {
+		return fmt.Errorf("neispravna low-water mark pozicija")
+	}
+
+	segments, err := w.listSegments()
+	if err != nil {
+		return err
+	}
+
+	for _, segment := range segments {
+		if segment.number >= lowWaterMark.SegmentNumber {
+			continue
+		}
+
+		if err := os.Remove(segment.path); err != nil {
+			return err
+		}
 	}
 
 	return nil
