@@ -5,6 +5,7 @@
 *.dylib
 bin/
 data/
+*.log
 
 # IDE
 .vscode/
