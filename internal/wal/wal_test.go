@@ -5,122 +5,49 @@ import (
 	"testing"
 )
 
-func TestSerializeDeserializeRecord(t *testing.T) {
-	record := Record{
-		Timestamp: 123456789,
-		Tombstone: false,
-		Key:       "name",
-		Value:     []byte("Dmitry"),
+func TestRecord(t *testing.T) {
+	records := []Record{
+		{
+			Timestamp: 123456789,
+			Tombstone: false,
+			Key:       "name",
+			Value:     []byte("Dmitry"),
+		},
+		{
+			Timestamp: 987654321,
+			Tombstone: true,
+			Key:       "name",
+			Value:     nil,
+		},
 	}
 
-	data := serializeRecord(record)
+	for _, record := range records {
+		data := serializeRecord(record)
 
-	result, err := deserializeRecord(data)
-	if err != nil {
-		t.Fatal(err)
-	}
+		result, err := deserializeRecord(data)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if result.Timestamp != record.Timestamp {
-		t.Errorf("ocekivan timestamp %d, dobili %d", record.Timestamp, result.Timestamp)
-	}
-
-	if result.Tombstone != record.Tombstone {
-		t.Errorf("ocekivan tombstone %v, dobili %v", record.Tombstone, result.Tombstone)
-	}
-
-	if result.Key != record.Key {
-		t.Errorf("ocekivan key %s, dobili %s", record.Key, result.Key)
-	}
-
-	if !bytes.Equal(result.Value, record.Value) {
-		t.Errorf("ocekivan value %v, dobili %v", record.Value, result.Value)
-	}
-}
-
-func TestSerializeDeserializeTombstone(t *testing.T) {
-	record := Record{
-		Timestamp: 987654321,
-		Tombstone: true,
-		Key:       "name",
-		Value:     nil,
-	}
-
-	data := serializeRecord(record)
-
-	result, err := deserializeRecord(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if result.Timestamp != record.Timestamp {
-		t.Errorf("ocekuivan %d, dobili %d", record.Timestamp, result.Timestamp)
-	}
-
-	if !result.Tombstone {
-		t.Error(" tombstone trebalo je da bude true")
-	}
-
-	if result.Key != record.Key {
-		t.Errorf("ocekuivan key %s, dobili %s", record.Key, result.Key)
-	}
-
-	if result.Value != nil {
-		t.Errorf("ocekuivan nil value, dobili %v", result.Value)
+		if result.Timestamp != record.Timestamp ||
+			result.Tombstone != record.Tombstone ||
+			result.Key != record.Key ||
+			!bytes.Equal(result.Value, record.Value) {
+			t.Fatal("Testiranje ser. i deser. record-a je neuspesno")
+		}
 	}
 }
 
-func TestSerializeDeserializeFragment(t *testing.T) {
-	payload := []byte("wal data")
+func TestFragment(t *testing.T) {
+	payload := []byte("some WAL data")
 
-	data, err := serializeFragment(FragmentFull, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	fragment, err := deserializeFragment(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if fragment.Type != FragmentFull {
-		t.Errorf("ocekivan fragment type %d, dobili %d", FragmentFull, fragment.Type)
-	}
-
-	if fragment.Size != uint16(len(payload)) {
-		t.Errorf("ocekivan size %d, dobili %d", len(payload), fragment.Size)
-	}
-
-	if !bytes.Equal(fragment.Payload, payload) {
-		t.Errorf("ocekivan payload %v, dobili %v", payload, fragment.Payload)
-	}
-}
-
-func TestFragmentCRC(t *testing.T) {
-	payload := []byte("wal data")
-
-	data, err := serializeFragment(FragmentFull, payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	data[len(data)-1]++
-
-	_, err = deserializeFragment(data)
-	if err == nil {
-		t.Fatal("ocekivana greska CRC")
-	}
-}
-
-func TestFragmentTypes(t *testing.T) {
-	types := []FragmentType{
+	for _, fragmentType := range []FragmentType{
 		FragmentFull,
 		FragmentFirst,
 		FragmentMiddle,
 		FragmentLast,
-	}
-
-	for _, fragmentType := range types {
-		data, err := serializeFragment(fragmentType, []byte("data"))
+	} {
+		data, err := serializeFragment(fragmentType, payload)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -130,8 +57,21 @@ func TestFragmentTypes(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if fragment.Type != fragmentType {
-			t.Errorf("ocekivan fragment type %d, dobili %d", fragmentType, fragment.Type)
+		if fragment.Type != fragmentType ||
+			fragment.Size != uint16(len(payload)) ||
+			!bytes.Equal(fragment.Payload, payload) {
+			t.Fatal("Testiranje ser. i deser. fragment-a je neuspesno")
 		}
+	}
+
+	data, err := serializeFragment(FragmentFull, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data[len(data)-1]++
+
+	if _, err = deserializeFragment(data); err == nil {
+		t.Fatal("CRC validacija je neuspesna")
 	}
 }
