@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"path/filepath"
 	"testing"
 )
 
@@ -73,5 +74,37 @@ func TestFragment(t *testing.T) {
 
 	if _, err = deserializeFragment(data); err == nil {
 		t.Fatal("CRC validacija je neuspesna")
+	}
+}
+
+func TestWALPosition(t *testing.T) {
+	w := WAL{
+		directory:         "data/wal",
+		blockSize:         4096,
+		segmentBlockCount: 2,
+		currentPosition: Position{
+			SegmentNumber: 1,
+		},
+		currentBlock: make([]byte, 4096),
+	}
+
+	if w.segmentPath(2) != filepath.Join("data/wal", "wal_0002.log") {
+		t.Fatal("neispravna putanja do segmenta")
+	}
+
+	w.advanceBlock()
+
+	if w.currentPosition.SegmentNumber != 1 ||
+		w.currentPosition.BlockNumber != 1 ||
+		w.currentPosition.Offset != 0 {
+		t.Fatal("neispravna pozicija u bloku")
+	}
+
+	w.advanceBlock()
+
+	if w.currentPosition.SegmentNumber != 2 ||
+		w.currentPosition.BlockNumber != 0 ||
+		w.currentPosition.Offset != 0 {
+		t.Fatal("nismo se prebacili na drugi segment a morali smo")
 	}
 }
