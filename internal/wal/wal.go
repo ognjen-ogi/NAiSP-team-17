@@ -230,7 +230,8 @@ func (w *WAL) Replay(apply func(Record) error) error {
 				switch fragment.Type {
 				case FragmentFull:
 					if assembling {
-						return fmt.Errorf("FULL fragment pronadjen pre zavrsetka prethodnog zapisa")
+						recordData = recordData[:0]
+						assembling = false
 					}
 
 					skipOrphanFragments = false
@@ -243,10 +244,9 @@ func (w *WAL) Replay(apply func(Record) error) error {
 					if err := apply(record); err != nil {
 						return err
 					}
-
 				case FragmentFirst:
 					if assembling {
-						return fmt.Errorf("FIRST fragment pronadjen pre zavrsetka prethodnog zapisa")
+						recordData = recordData[:0]
 					}
 
 					skipOrphanFragments = false
