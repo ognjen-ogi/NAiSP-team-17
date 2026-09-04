@@ -1,31 +1,31 @@
 package config
 
 type Config struct {
-	WAL          WALConfig
-	Memtable     MemtableConfig
-	BlockManager BlockManagerConfig
-	BlockCache   BlockCacheConfig
-	Cache        CacheConfig
+	WAL          WALConfig          `yaml:"wal"`
+	Memtable     MemtableConfig     `yaml:"memtable"`
+	BlockManager BlockManagerConfig `yaml:"block_manager"`
+	BlockCache   BlockCacheConfig   `yaml:"block_cache"`
+	Cache        CacheConfig        `yaml:"cache"`
 }
 
 type WALConfig struct {
-	SegmentBlockCount int64
+	SegmentBlockCount int64 `yaml:"segment_block_count"`
 }
 
 type MemtableConfig struct {
-	SizeLimitType string
-	SizeLimit     int
-	Structure     string
+	SizeLimitType string `yaml:"size_limit_type"`
+	SizeLimit     int    `yaml:"size_limit"`
+	Structure     string `yaml:"structure"`
 }
 
 type BlockManagerConfig struct {
-	BlockSize int
+	BlockSize int `yaml:"block_size"`
 }
 
 type BlockCacheConfig struct {
-	Capacity int
+	Capacity int `yaml:"capacity"`
 }
 
 type CacheConfig struct {
-	Capacity int
+	Capacity int `yaml:"capacity"`
 }
