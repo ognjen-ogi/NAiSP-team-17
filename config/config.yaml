@@ -1,0 +1,19 @@
+wal:
+  segment_block_count: 3
+
+memtable:
+  size_limit_type: count
+  size_limit: 3
+  structure: hashmap
+
+sstable:
+  summary_degree: 5
+
+block_manager:
+  block_size: 4096
+
+block_cache:
+  capacity: 5
+
+cache:
+  capacity: 5
