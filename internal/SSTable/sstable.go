@@ -2,6 +2,7 @@ package sstable
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -17,7 +18,8 @@ import (
 
 const (
 	fileMagic       = "SSTABLE2"
-	headerSize      = 96
+	metadataMagic   = "MERKLE1"
+	headerSize      = 128
 	defaultSummaryN = 5
 )
 
@@ -40,13 +42,22 @@ type SummaryEntry struct {
 	IndexOffset uint64
 }
 
+// MerkleValidation describes the result of validating an SSTable's Data.
+// ChangedRecords contains zero-based record positions whose values differ
+// from the hashes persisted when the table was created.
+type MerkleValidation struct {
+	Valid          bool
+	ChangedRecords []int
+}
+
 type tableHeader struct {
-	SummaryDegree               uint32
-	RecordCount                 uint64
-	DataStart, DataLength       uint64
-	IndexStart, IndexLength     uint64
-	SummaryStart, SummaryLength uint64
-	BloomStart, BloomLength     uint64
+	SummaryDegree                 uint32
+	RecordCount                   uint64
+	DataStart, DataLength         uint64
+	IndexStart, IndexLength       uint64
+	SummaryStart, SummaryLength   uint64
+	BloomStart, BloomLength       uint64
+	MetadataStart, MetadataLength uint64
 }
 
 type SSTable struct {
@@ -59,7 +70,6 @@ type SSTable struct {
 func NewSSTable(path string, blockSize int, cache *blockcache.BlockCache) *SSTable {
 	return NewSSTableWithSummaryDegree(path, blockSize, cache, defaultSummaryN)
 }
-
 
 func NewSSTableWithSummaryDegree(path string, blockSize int, cache *blockcache.BlockCache, degree int) *SSTable {
 	if blockSize <= 0 {
@@ -85,9 +95,11 @@ func (s *SSTable) WriteRecords(records []memtable.FlushRecord) error {
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Key < ordered[j].Key })
 	var data bytes.Buffer
 	entries := make([]IndexEntry, 0, len(ordered))
+	leaves := make([][sha256.Size]byte, 0, len(ordered))
 	filter := newBloomFilter(len(ordered))
 	for _, rec := range ordered {
 		filter.Add(rec.Key)
+		leaves = append(leaves, sha256.Sum256(rec.Value))
 		offset := uint64(data.Len())
 		payload := serializeRecord(Record{Key: rec.Key, Value: rec.Value, Tombstone: rec.Tombstone})
 		var length [4]byte
@@ -105,6 +117,10 @@ func (s *SSTable) WriteRecords(records []memtable.FlushRecord) error {
 		return err
 	}
 	bloom := serializeBloom(filter)
+	metadata, err := serializeMerkleMetadata(leaves)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil && filepath.Dir(s.path) != "." {
 		return err
 	}
@@ -128,7 +144,12 @@ func (s *SSTable) WriteRecords(records []memtable.FlushRecord) error {
 	if err != nil {
 		return err
 	}
-	header := tableHeader{SummaryDegree: uint32(s.summaryDegree), RecordCount: uint64(len(entries)), DataStart: dataStart, DataLength: uint64(data.Len()), IndexStart: indexStart, IndexLength: uint64(len(index)), SummaryStart: summaryStart, SummaryLength: uint64(len(summary)), BloomStart: bloomStart, BloomLength: uint64(len(bloom))}
+	next = bloomStart + sectionBlocks(uint64(len(bloom)), uint64(s.blockSize))
+	metadataStart, err := s.writeSection(next, metadata)
+	if err != nil {
+		return err
+	}
+	header := tableHeader{SummaryDegree: uint32(s.summaryDegree), RecordCount: uint64(len(entries)), DataStart: dataStart, DataLength: uint64(data.Len()), IndexStart: indexStart, IndexLength: uint64(len(index)), SummaryStart: summaryStart, SummaryLength: uint64(len(summary)), BloomStart: bloomStart, BloomLength: uint64(len(bloom)), MetadataStart: metadataStart, MetadataLength: uint64(len(metadata))}
 	return s.manager.WriteBlock(s.path, 0, encodeHeader(s.blockSize, header))
 }
 
@@ -232,8 +253,15 @@ func (s *SSTable) readHeader() (tableHeader, error) {
 	if err != nil {
 		return tableHeader{}, err
 	}
-	if len(block) < headerSize || string(block[:len(fileMagic)]) != fileMagic {
+	if len(block) < 16 || string(block[:len(fileMagic)]) != fileMagic {
 		return tableHeader{}, errLegacyTable
+	}
+	version := binary.BigEndian.Uint32(block[8:12])
+	if version == 1 {
+		return decodeHeaderV1(block), nil
+	}
+	if version != 2 || len(block) < headerSize {
+		return tableHeader{}, errors.New("nepoznata SSTable verzija")
 	}
 	return decodeHeader(block), nil
 }
@@ -241,10 +269,11 @@ func (s *SSTable) readHeader() (tableHeader, error) {
 func encodeHeader(blockSize int, h tableHeader) []byte {
 	block := make([]byte, blockSize)
 	copy(block, fileMagic)
-	binary.BigEndian.PutUint32(block[8:12], 1)
+	binary.BigEndian.PutUint32(block[8:12], 2)
 	binary.BigEndian.PutUint32(block[12:16], h.SummaryDegree)
 	binary.BigEndian.PutUint64(block[16:24], h.RecordCount)
 	values := []uint64{h.DataStart, h.DataLength, h.IndexStart, h.IndexLength, h.SummaryStart, h.SummaryLength, h.BloomStart, h.BloomLength}
+	values = append(values, h.MetadataStart, h.MetadataLength)
 	for i, value := range values {
 		binary.BigEndian.PutUint64(block[24+i*8:32+i*8], value)
 	}
@@ -252,6 +281,10 @@ func encodeHeader(blockSize int, h tableHeader) []byte {
 }
 
 func decodeHeader(block []byte) tableHeader {
+	return tableHeader{SummaryDegree: binary.BigEndian.Uint32(block[12:16]), RecordCount: binary.BigEndian.Uint64(block[16:24]), DataStart: binary.BigEndian.Uint64(block[24:32]), DataLength: binary.BigEndian.Uint64(block[32:40]), IndexStart: binary.BigEndian.Uint64(block[40:48]), IndexLength: binary.BigEndian.Uint64(block[48:56]), SummaryStart: binary.BigEndian.Uint64(block[56:64]), SummaryLength: binary.BigEndian.Uint64(block[64:72]), BloomStart: binary.BigEndian.Uint64(block[72:80]), BloomLength: binary.BigEndian.Uint64(block[80:88]), MetadataStart: binary.BigEndian.Uint64(block[88:96]), MetadataLength: binary.BigEndian.Uint64(block[96:104])}
+}
+
+func decodeHeaderV1(block []byte) tableHeader {
 	return tableHeader{SummaryDegree: binary.BigEndian.Uint32(block[12:16]), RecordCount: binary.BigEndian.Uint64(block[16:24]), DataStart: binary.BigEndian.Uint64(block[24:32]), DataLength: binary.BigEndian.Uint64(block[32:40]), IndexStart: binary.BigEndian.Uint64(block[40:48]), IndexLength: binary.BigEndian.Uint64(block[48:56]), SummaryStart: binary.BigEndian.Uint64(block[56:64]), SummaryLength: binary.BigEndian.Uint64(block[64:72]), BloomStart: binary.BigEndian.Uint64(block[72:80]), BloomLength: binary.BigEndian.Uint64(block[80:88])}
 }
 
@@ -330,6 +363,112 @@ func (s *SSTable) readAt(sectionStart, sectionLength, offset, length uint64) ([]
 		length -= take
 	}
 	return out, nil
+}
+
+// ValidateMerkle verifies the persisted Merkle metadata against the current
+// Data section and reports zero-based positions whose values were modified.
+func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
+	if s == nil {
+		return MerkleValidation{}, errors.New("sstable je nil")
+	}
+	h, err := s.readHeader()
+	if err != nil {
+		if errors.Is(err, errLegacyTable) {
+			return MerkleValidation{}, errors.New("SSTable nema Merkle metadata")
+		}
+		return MerkleValidation{}, err
+	}
+	metadata, err := s.readSection(h.MetadataStart, h.MetadataLength)
+	if err != nil {
+		return MerkleValidation{}, err
+	}
+	leaves, expectedRoot, err := deserializeMerkleMetadata(metadata)
+	if err != nil {
+		return MerkleValidation{}, err
+	}
+	if uint64(len(leaves)) != h.RecordCount {
+		return MerkleValidation{}, errors.New("Merkle metadata ne odgovara broju zapisa")
+	}
+	index, err := s.readIndex(h)
+	if err != nil {
+		return MerkleValidation{}, err
+	}
+	if len(index) != len(leaves) {
+		return MerkleValidation{}, errors.New("Merkle metadata ne odgovara Index strukturi")
+	}
+
+	currentLeaves := make([][sha256.Size]byte, len(leaves))
+	result := MerkleValidation{Valid: true}
+	for i, entry := range index {
+		record, err := s.readRecord(h, entry.Offset)
+		if err != nil {
+			return MerkleValidation{}, fmt.Errorf("ne mogu da validiram Data zapis %d: %w", i, err)
+		}
+		currentLeaves[i] = sha256.Sum256(record.Value)
+		if currentLeaves[i] != leaves[i] {
+			result.Valid = false
+			result.ChangedRecords = append(result.ChangedRecords, i)
+		}
+	}
+	if calculateMerkleRoot(currentLeaves) != expectedRoot {
+		result.Valid = false
+	}
+	return result, nil
+}
+
+// ValidateMetadata is an alias for ValidateMerkle.
+func (s *SSTable) ValidateMetadata() (MerkleValidation, error) { return s.ValidateMerkle() }
+
+func serializeMerkleMetadata(leaves [][sha256.Size]byte) ([]byte, error) {
+	root := calculateMerkleRoot(leaves)
+	result := make([]byte, 48+sha256.Size*len(leaves))
+	copy(result, metadataMagic)
+	binary.BigEndian.PutUint64(result[8:16], uint64(len(leaves)))
+	copy(result[16:48], root[:])
+	for i, leaf := range leaves {
+		copy(result[48+i*sha256.Size:], leaf[:])
+	}
+	return result, nil
+}
+
+func deserializeMerkleMetadata(data []byte) ([][sha256.Size]byte, [sha256.Size]byte, error) {
+	var root [sha256.Size]byte
+	if len(data) < 48 || string(data[:len(metadataMagic)]) != metadataMagic {
+		return nil, root, errors.New("neispravni Merkle metadata")
+	}
+	count := binary.BigEndian.Uint64(data[8:16])
+	expectedLength := uint64(48) + count*sha256.Size
+	if expectedLength != uint64(len(data)) {
+		return nil, root, errors.New("neispravna duzina Merkle metadata")
+	}
+	copy(root[:], data[16:48])
+	leaves := make([][sha256.Size]byte, count)
+	for i := range leaves {
+		copy(leaves[i][:], data[48+i*sha256.Size:])
+	}
+	return leaves, root, nil
+}
+
+func calculateMerkleRoot(leaves [][sha256.Size]byte) [sha256.Size]byte {
+	if len(leaves) == 0 {
+		return sha256.Sum256(nil)
+	}
+	level := append([][sha256.Size]byte(nil), leaves...)
+	for len(level) > 1 {
+		next := make([][sha256.Size]byte, 0, (len(level)+1)/2)
+		for i := 0; i < len(level); i += 2 {
+			right := level[i]
+			if i+1 < len(level) {
+				right = level[i+1]
+			}
+			var input [sha256.Size * 2]byte
+			copy(input[:sha256.Size], level[i][:])
+			copy(input[sha256.Size:], right[:])
+			next = append(next, sha256.Sum256(input[:]))
+		}
+		level = next
+	}
+	return level[0]
 }
 
 func (s *SSTable) getLegacy(key string) ([]byte, bool, bool, error) {
