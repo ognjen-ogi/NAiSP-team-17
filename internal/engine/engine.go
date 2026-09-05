@@ -145,6 +145,45 @@ func (e *Engine) Delete(key string) error {
 	return nil
 }
 
+func (e *Engine) Get(key string) ([]byte, bool, error) {
+	value, tombstone, found := e.memtable.Get(key)
+	if found {
+		if tombstone {
+			return nil, false, nil
+		}
+		return value, true, nil
+	}
+
+	value, tombstone, found = e.cache.Get(key)
+	if found {
+		if tombstone {
+			return nil, false, nil
+		}
+		return value, true, nil
+	}
+
+	for i := len(e.sstables) - 1; i >= 0; i-- {
+		value, tombstone, found, err := e.sstables[i].Get(key)
+		if err != nil {
+			return nil, false, fmt.Errorf("neuspesno citanje iz SSTable: %w", err)
+		}
+
+		if !found {
+			continue
+		}
+
+		e.cache.Put(key, value, tombstone)
+
+		if tombstone {
+			return nil, false, nil
+		}
+
+		return value, true, nil
+	}
+
+	return nil, false, nil
+}
+
 func (e *Engine) flushMemtable() error {
 	records := e.memtable.Flush()
 	if len(records) == 0 {
