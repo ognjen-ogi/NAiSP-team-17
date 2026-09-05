@@ -480,7 +480,11 @@ func (w *WAL) saveLowWaterMark(position Position) error {
 		position.Offset,
 	))
 
-	if err := os.WriteFile(w.lowWaterMarkPath(), data, 0644); err != nil {
+	if err := w.blockManager.WriteBlock(
+		w.lowWaterMarkPath(),
+		0,
+		data,
+	); err != nil {
 		return fmt.Errorf("neuspesno cuvanje low-water mark pozicije: %w", err)
 	}
 
@@ -494,11 +498,19 @@ func (w *WAL) loadLowWaterMark() (Position, error) {
 		Offset:        0,
 	}
 
-	data, err := os.ReadFile(w.lowWaterMarkPath())
+	_, err := os.Stat(w.lowWaterMarkPath())
 	if os.IsNotExist(err) {
 		return defaultPosition, nil
 	}
 
+	if err != nil {
+		return Position{}, fmt.Errorf("neuspesna provera low-water mark fajla: %w", err)
+	}
+
+	data, err := w.blockManager.ReadBlock(
+		w.lowWaterMarkPath(),
+		0,
+	)
 	if err != nil {
 		return Position{}, fmt.Errorf("neuspesno citanje low-water mark pozicije: %w", err)
 	}
@@ -512,7 +524,6 @@ func (w *WAL) loadLowWaterMark() (Position, error) {
 		&position.BlockNumber,
 		&position.Offset,
 	)
-
 	if err != nil {
 		return Position{}, fmt.Errorf("neispravna low-water mark pozicija: %w", err)
 	}
