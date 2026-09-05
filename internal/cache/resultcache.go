@@ -89,3 +89,26 @@ func (c *ResultCache) Invalidate(key string) {
 		delete(c.items, key)
 	}
 }
+
+type DebugEntry struct {
+	Key       string
+	Value     []byte
+	Tombstone bool
+}
+
+func (c *ResultCache) DebugEntries() []DebugEntry {
+
+	entries := make([]DebugEntry, 0, c.list.Len())
+
+	for element := c.list.Front(); element != nil; element = element.Next() {
+		entry := element.Value.(*cacheEntry)
+
+		entries = append(entries, DebugEntry{
+			Key:       entry.key,
+			Value:     append([]byte(nil), entry.value...),
+			Tombstone: entry.tombstone,
+		})
+	}
+
+	return entries
+}

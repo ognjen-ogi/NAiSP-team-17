@@ -388,3 +388,22 @@ func (w *WAL) DeleteSegmentsBefore(lowWaterMark Position) error {
 
 	return nil
 }
+
+func (w *WAL) CurrentPosition() Position {
+	return w.currentPosition
+}
+
+func (w *WAL) SegmentNames() ([]string, error) {
+	segments, err := w.listSegments()
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(segments))
+
+	for _, segment := range segments {
+		names = append(names, filepath.Base(segment.path))
+	}
+
+	return names, nil
+}

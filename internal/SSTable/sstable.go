@@ -42,9 +42,6 @@ type SummaryEntry struct {
 	IndexOffset uint64
 }
 
-// MerkleValidation describes the result of validating an SSTable's Data.
-// ChangedRecords contains zero-based record positions whose values differ
-// from the hashes persisted when the table was created.
 type MerkleValidation struct {
 	Valid          bool
 	ChangedRecords []int
@@ -365,8 +362,6 @@ func (s *SSTable) readAt(sectionStart, sectionLength, offset, length uint64) ([]
 	return out, nil
 }
 
-// ValidateMerkle verifies the persisted Merkle metadata against the current
-// Data section and reports zero-based positions whose values were modified.
 func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 	if s == nil {
 		return MerkleValidation{}, errors.New("sstable je nil")
@@ -416,7 +411,6 @@ func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 	return result, nil
 }
 
-// ValidateMetadata is an alias for ValidateMerkle.
 func (s *SSTable) ValidateMetadata() (MerkleValidation, error) { return s.ValidateMerkle() }
 
 func serializeMerkleMetadata(leaves [][sha256.Size]byte) ([]byte, error) {

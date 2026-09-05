@@ -1,16 +1,16 @@
 wal:
-  segment_block_count: 4
+  segment_block_count: 1
 
 memtable:
   size_limit_type: count
-  size_limit: 100
+  size_limit: 3
   structure: hashmap
 
 block_manager:
   block_size: 4096
 
 block_cache:
-  capacity: 50
+  capacity: 2
 
 cache:
-  capacity: 100
+  capacity: 2

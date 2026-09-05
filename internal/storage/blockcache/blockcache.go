@@ -106,3 +106,26 @@ func (c *BlockCache) Invalidate(path string, blockNumber int64) {
 		delete(c.items, key)
 	}
 }
+
+type DebugEntry struct {
+	Path        string
+	BlockNumber int64
+	Size        int
+}
+
+func (c *BlockCache) DebugEntries() []DebugEntry {
+
+	entries := make([]DebugEntry, 0, c.list.Len())
+
+	for element := c.list.Front(); element != nil; element = element.Next() {
+		entry := element.Value.(*cacheEntry)
+
+		entries = append(entries, DebugEntry{
+			Path:        entry.key.path,
+			BlockNumber: entry.key.blockNumber,
+			Size:        len(entry.data),
+		})
+	}
+
+	return entries
+}
