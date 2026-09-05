@@ -404,3 +404,139 @@ func deserializeBloom(data []byte) (BloomFilter, error) {
 	return BloomFilter{HashCount: binary.BigEndian.Uint32(data[:4]), Bits: append([]byte(nil), data[4:]...)}, nil
 }
 
+func serializeIndex(entries []IndexEntry) ([]byte, error) {
+	var out bytes.Buffer
+	for _, entry := range entries {
+		if err := writeString(&out, entry.Key); err != nil {
+			return nil, err
+		}
+		var offset [8]byte
+		binary.BigEndian.PutUint64(offset[:], entry.Offset)
+		out.Write(offset[:])
+	}
+	return out.Bytes(), nil
+}
+func deserializeIndex(data []byte) ([]IndexEntry, error) {
+	var result []IndexEntry
+	for len(data) > 0 {
+		key, rest, err := readString(data)
+		if err != nil {
+			return nil, err
+		}
+		if len(rest) < 8 {
+			return nil, errors.New("neispravan Index")
+		}
+		result = append(result, IndexEntry{Key: key, Offset: binary.BigEndian.Uint64(rest[:8])})
+		data = rest[8:]
+	}
+	return result, nil
+}
+func serializeSummary(entries []IndexEntry, degree int) ([]byte, error) {
+	var out bytes.Buffer
+	for i := 0; i < len(entries); i += degree {
+		if err := writeString(&out, entries[i].Key); err != nil {
+			return nil, err
+		}
+		var offset [8]byte
+		binary.BigEndian.PutUint64(offset[:], uint64(i))
+		out.Write(offset[:])
+	}
+	if len(entries) > 0 && (len(entries)-1)%degree != 0 {
+		if err := writeString(&out, entries[len(entries)-1].Key); err != nil {
+			return nil, err
+		}
+		var offset [8]byte
+		binary.BigEndian.PutUint64(offset[:], uint64(len(entries)-1))
+		out.Write(offset[:])
+	}
+	return out.Bytes(), nil
+}
+func deserializeSummary(data []byte) ([]SummaryEntry, error) {
+	var result []SummaryEntry
+	for len(data) > 0 {
+		key, rest, err := readString(data)
+		if err != nil {
+			return nil, err
+		}
+		if len(rest) < 8 {
+			return nil, errors.New("neispravan Summary")
+		}
+		result = append(result, SummaryEntry{Key: key, IndexOffset: binary.BigEndian.Uint64(rest[:8])})
+		data = rest[8:]
+	}
+	return result, nil
+}
+func writeString(out *bytes.Buffer, value string) error {
+	if uint64(len(value)) > uint64(^uint32(0)) {
+		return errors.New("string je predugacak")
+	}
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	out.Write(length[:])
+	out.WriteString(value)
+	return nil
+}
+func readString(data []byte) (string, []byte, error) {
+	if len(data) < 4 {
+		return "", nil, errors.New("neispravan string")
+	}
+	length := int(binary.BigEndian.Uint32(data[:4]))
+	if len(data) < 4+length {
+		return "", nil, errors.New("neispravan string")
+	}
+	return string(data[4 : 4+length]), data[4+length:], nil
+}
+
+func serializeRecord(r Record) []byte {
+	keyBytes := []byte(r.Key)
+	valueBytes := append([]byte(nil), r.Value...)
+	var out bytes.Buffer
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(keyBytes)))
+	out.Write(length[:])
+	out.Write(keyBytes)
+	if r.Tombstone {
+		out.WriteByte(1)
+	} else {
+		out.WriteByte(0)
+	}
+	binary.BigEndian.PutUint32(length[:], uint32(len(valueBytes)))
+	out.Write(length[:])
+	out.Write(valueBytes)
+	return out.Bytes()
+}
+func parseRecords(block []byte) ([]Record, error) {
+	var records []Record
+	for i := 0; i < len(block); {
+		if i+4 > len(block) {
+			break
+		}
+		keyLen := int(binary.BigEndian.Uint32(block[i : i+4]))
+		i += 4
+		if keyLen == 0 {
+			break
+		}
+		if i+keyLen > len(block) {
+			break
+		}
+		key := string(block[i : i+keyLen])
+		i += keyLen
+		if i >= len(block) {
+			break
+		}
+		tombstone := block[i] == 1
+		i++
+		if i+4 > len(block) {
+			break
+		}
+		valueLen := int(binary.BigEndian.Uint32(block[i : i+4]))
+		i += 4
+		if i+valueLen > len(block) {
+			break
+		}
+		value := append([]byte(nil), block[i:i+valueLen]...)
+		i += valueLen
+		records = append(records, Record{Key: key, Value: value, Tombstone: tombstone})
+	}
+	return records, nil
+}
