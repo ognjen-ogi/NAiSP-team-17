@@ -199,10 +199,11 @@ func (e *Engine) flushMemtable() error {
 		fmt.Sprintf("sstable_%04d.db", e.nextSSTableNumber),
 	)
 
-	table := sstable.NewSSTable(
+	table := sstable.NewSSTableWithSummaryDegree(
 		path,
 		e.config.BlockManager.BlockSize,
 		e.blockCache,
+		e.config.SSTable.SummaryDegree,
 	)
 
 	if err := table.WriteRecords(records); err != nil {

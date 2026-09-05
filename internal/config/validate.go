@@ -22,6 +22,10 @@ func Validate(cfg Config) error {
 		return fmt.Errorf("memtable.structure mora biti hashmap, skiplist ili btree")
 	}
 
+	if cfg.SSTable.SummaryDegree <= 0 {
+		return fmt.Errorf("sstable.summary_degree mora biti veci od 0")
+	}
+
 	if cfg.BlockManager.BlockSize != 4096 &&
 		cfg.BlockManager.BlockSize != 8192 &&
 		cfg.BlockManager.BlockSize != 16384 {
