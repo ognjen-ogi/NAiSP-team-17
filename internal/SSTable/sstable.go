@@ -89,71 +89,122 @@ func (s *SSTable) WriteRecords(records []memtable.FlushRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
+
 	ordered := append([]memtable.FlushRecord(nil), records...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Key < ordered[j].Key })
+
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Key < ordered[j].Key
+	})
+
 	var data bytes.Buffer
+
 	entries := make([]IndexEntry, 0, len(ordered))
 	leaves := make([][sha256.Size]byte, 0, len(ordered))
 	filter := newBloomFilter(len(ordered))
+
 	for _, rec := range ordered {
 		filter.Add(rec.Key)
-		leaves = append(leaves, sha256.Sum256(rec.Value))
-		offset := uint64(data.Len())
-		payload := serializeRecord(Record{
+
+		record := Record{
 			Key:       rec.Key,
 			Value:     rec.Value,
 			Timestamp: rec.Timestamp,
 			Tombstone: rec.Tombstone,
-		})
+		}
+
+		leaves = append(leaves, hashRecord(record))
+
+		offset := uint64(data.Len())
+		payload := serializeRecord(record)
+
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(payload)))
+
 		data.Write(length[:])
 		data.Write(payload)
-		entries = append(entries, IndexEntry{Key: rec.Key, Offset: offset})
+
+		entries = append(entries, IndexEntry{
+			Key:    rec.Key,
+			Offset: offset,
+		})
 	}
+
 	index, err := serializeIndex(entries)
 	if err != nil {
 		return err
 	}
+
 	summary, err := serializeSummary(entries, s.summaryDegree)
 	if err != nil {
 		return err
 	}
+
 	bloom := serializeBloom(filter)
+
 	metadata, err := serializeMerkleMetadata(leaves)
 	if err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil && filepath.Dir(s.path) != "." {
 		return err
 	}
+
 	next := uint64(1)
+
 	dataStart, err := s.writeSection(next, data.Bytes())
 	if err != nil {
 		return err
 	}
+
 	next = dataStart + sectionBlocks(uint64(data.Len()), uint64(s.blockSize))
+
 	indexStart, err := s.writeSection(next, index)
 	if err != nil {
 		return err
 	}
+
 	next = indexStart + sectionBlocks(uint64(len(index)), uint64(s.blockSize))
+
 	summaryStart, err := s.writeSection(next, summary)
 	if err != nil {
 		return err
 	}
+
 	next = summaryStart + sectionBlocks(uint64(len(summary)), uint64(s.blockSize))
+
 	bloomStart, err := s.writeSection(next, bloom)
 	if err != nil {
 		return err
 	}
+
 	next = bloomStart + sectionBlocks(uint64(len(bloom)), uint64(s.blockSize))
+
 	metadataStart, err := s.writeSection(next, metadata)
 	if err != nil {
 		return err
 	}
-	header := tableHeader{SummaryDegree: uint32(s.summaryDegree), RecordCount: uint64(len(entries)), DataStart: dataStart, DataLength: uint64(data.Len()), IndexStart: indexStart, IndexLength: uint64(len(index)), SummaryStart: summaryStart, SummaryLength: uint64(len(summary)), BloomStart: bloomStart, BloomLength: uint64(len(bloom)), MetadataStart: metadataStart, MetadataLength: uint64(len(metadata))}
-	return s.manager.WriteBlock(s.path, 0, encodeHeader(s.blockSize, header))
+
+	header := tableHeader{
+		SummaryDegree:  uint32(s.summaryDegree),
+		RecordCount:    uint64(len(entries)),
+		DataStart:      dataStart,
+		DataLength:     uint64(data.Len()),
+		IndexStart:     indexStart,
+		IndexLength:    uint64(len(index)),
+		SummaryStart:   summaryStart,
+		SummaryLength:  uint64(len(summary)),
+		BloomStart:     bloomStart,
+		BloomLength:    uint64(len(bloom)),
+		MetadataStart:  metadataStart,
+		MetadataLength: uint64(len(metadata)),
+	}
+
+	return s.manager.WriteBlock(
+		s.path,
+		0,
+		encodeHeader(s.blockSize, header),
+	)
 }
 
 func (s *SSTable) Write(records []memtable.FlushRecord) error { return s.WriteRecords(records) }
@@ -452,10 +503,14 @@ func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 		if errors.Is(err, errLegacyTable) {
 			return MerkleValidation{}, errors.New("SSTable nema Merkle metadata")
 		}
+
 		return MerkleValidation{}, err
 	}
 
-	metadata, err := s.readSection(h.MetadataStart, h.MetadataLength)
+	metadata, err := s.readSection(
+		h.MetadataStart,
+		h.MetadataLength,
+	)
 	if err != nil {
 		return MerkleValidation{}, err
 	}
@@ -466,26 +521,39 @@ func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 	}
 
 	if uint64(len(leaves)) != h.RecordCount {
-		return MerkleValidation{}, errors.New("Merkle metadata ne odgovara broju zapisa")
+		return MerkleValidation{}, errors.New(
+			"Merkle metadata ne odgovara broju zapisa",
+		)
 	}
 
 	currentLeaves := make([][sha256.Size]byte, len(leaves))
-	result := MerkleValidation{Valid: true}
+
+	result := MerkleValidation{
+		Valid: true,
+	}
 
 	indexOffset := uint64(0)
 	recordNumber := 0
 
 	for indexOffset < h.IndexLength {
 		if recordNumber >= len(leaves) {
-			return MerkleValidation{}, errors.New("Merkle metadata ne odgovara Index strukturi")
+			return MerkleValidation{}, errors.New(
+				"Merkle metadata ne odgovara Index strukturi",
+			)
 		}
 
-		entry, nextOffset, err := s.readIndexEntry(h, indexOffset)
+		entry, nextOffset, err := s.readIndexEntry(
+			h,
+			indexOffset,
+		)
 		if err != nil {
 			return MerkleValidation{}, err
 		}
 
-		record, err := s.readRecord(h, entry.Offset)
+		record, err := s.readRecord(
+			h,
+			entry.Offset,
+		)
 		if err != nil {
 			return MerkleValidation{}, fmt.Errorf(
 				"ne mogu da validiram Data zapis %d: %w",
@@ -494,7 +562,7 @@ func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 			)
 		}
 
-		currentLeaves[recordNumber] = sha256.Sum256(record.Value)
+		currentLeaves[recordNumber] = hashRecord(record)
 
 		if currentLeaves[recordNumber] != leaves[recordNumber] {
 			result.Valid = false
@@ -509,7 +577,9 @@ func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 	}
 
 	if recordNumber != len(leaves) {
-		return MerkleValidation{}, errors.New("Merkle metadata ne odgovara Index strukturi")
+		return MerkleValidation{}, errors.New(
+			"Merkle metadata ne odgovara Index strukturi",
+		)
 	}
 
 	if calculateMerkleRoot(currentLeaves) != expectedRoot {
@@ -517,6 +587,10 @@ func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 	}
 
 	return result, nil
+}
+
+func hashRecord(record Record) [sha256.Size]byte {
+	return sha256.Sum256(serializeRecord(record))
 }
 
 func (s *SSTable) ValidateMetadata() (MerkleValidation, error) { return s.ValidateMerkle() }
