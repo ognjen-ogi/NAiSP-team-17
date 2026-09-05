@@ -93,3 +93,51 @@ func Open(path string, blockSize int, cache *blockcache.BlockCache) (*SSTable, e
 	}
 	return NewSSTable(path, blockSize, cache), nil
 }
+
+// returns value, tombstone, found, error.
+func (s *SSTable) Get(key string) ([]byte, bool, bool, error) {
+	if s == nil {
+		return nil, false, false, errors.New("sstable je nil")
+	}
+
+	info, err := os.Stat(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, false, nil
+		}
+		return nil, false, false, fmt.Errorf("ne mogu da procitam stat za %s: %w", s.path, err)
+	}
+	if info.Size() == 0 {
+		return nil, false, false, nil
+	}
+
+	blocks := int64((info.Size() + int64(s.blockSize) - 1) / int64(s.blockSize))
+	for i := int64(0); i < blocks; i++ {
+		block, err := s.manager.ReadBlock(s.path, i)
+		if err != nil {
+			return nil, false, false, fmt.Errorf("ne mogu da procitam blok %d: %w", i, err)
+		}
+		records, err := parseRecords(block)
+		if err != nil {
+			return nil, false, false, fmt.Errorf("ne mogu da parsiram blok %d: %w", i, err)
+		}
+		for _, rec := range records {
+			if rec.Key == key {
+				return rec.Value, rec.Tombstone, true, nil
+			}
+		}
+	}
+
+	return nil, false, false, nil
+}
+
+// Get alias
+func (s *SSTable) Lookup(key string) ([]byte, bool, bool, error) {
+	return s.Get(key)
+}
+
+// returns value, found
+func (s *SSTable) Read(key string) ([]byte, bool, error) {
+	value, _, found, err := s.Get(key)
+	return value, found, err
+}
