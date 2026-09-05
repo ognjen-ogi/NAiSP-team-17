@@ -86,3 +86,10 @@ func (s *SSTable) WriteRecords(records []memtable.FlushRecord) error {
 func (s *SSTable) Write(records []memtable.FlushRecord) error {
 	return s.WriteRecords(records)
 }
+
+func Open(path string, blockSize int, cache *blockcache.BlockCache) (*SSTable, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	return NewSSTable(path, blockSize, cache), nil
+}
