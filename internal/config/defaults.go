@@ -7,6 +7,8 @@ const (
 	DefaultMemtableSizeLimit     = 100
 	DefaultMemtableStructure     = "hashmap"
 
+	DefaultSummaryDegree = 5
+
 	DefaultBlockSize = 4096
 
 	DefaultBlockCacheCapacity = 50
@@ -22,6 +24,9 @@ func DefaultConfig() Config {
 			SizeLimitType: DefaultMemtableSizeLimitType,
 			SizeLimit:     DefaultMemtableSizeLimit,
 			Structure:     DefaultMemtableStructure,
+		},
+		SSTable: SSTableConfig{
+			SummaryDegree: DefaultSummaryDegree,
 		},
 		BlockManager: BlockManagerConfig{
 			BlockSize: DefaultBlockSize,

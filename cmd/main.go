@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ognjen-ogi/NAiSP-team-17/internal/engine"
@@ -19,7 +20,7 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	fmt.Println("Key-Value Engine")
-	fmt.Println("Komande: PUT key value, GET key, DELETE key, EXIT")
+	fmt.Println("Komande: PUT key value, GET key, DELETE key, VALIDATE broj, EXIT")
 
 	for {
 		fmt.Print("> ")
@@ -87,6 +88,33 @@ func main() {
 			}
 
 			fmt.Println("OK")
+			e.PrintState()
+
+		case "VALIDATE":
+			if len(parts) != 2 {
+				fmt.Println("Upotreba: VALIDATE broj")
+				continue
+			}
+
+			number, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Println("Broj SSTable mora biti ceo broj")
+				continue
+			}
+
+			result, err := e.ValidateSSTable(number)
+			if err != nil {
+				fmt.Println("Greska:", err)
+				continue
+			}
+
+			if result.Valid {
+				fmt.Println("SSTable je ispravna")
+			} else {
+				fmt.Println("SSTable nije ispravna")
+				fmt.Println("Promenjeni zapisi:", result.ChangedRecords)
+			}
+
 			e.PrintState()
 
 		case "EXIT":

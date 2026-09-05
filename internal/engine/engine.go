@@ -110,7 +110,7 @@ func (e *Engine) Put(key string, value []byte) error {
 		return fmt.Errorf("neuspesan upis u WAL: %w", err)
 	}
 
-	e.memtable.Put(key, value)
+	e.memtable.PutWithTimestamp(key, value, record.Timestamp)
 	e.cache.Invalidate(key)
 	e.lastWALPosition = position
 
@@ -136,7 +136,7 @@ func (e *Engine) Delete(key string) error {
 		return fmt.Errorf("neuspesan upis brisanja u WAL: %w", err)
 	}
 
-	e.memtable.Delete(key)
+	e.memtable.DeleteWithTimestamp(key, record.Timestamp)
 	e.cache.Invalidate(key)
 	e.lastWALPosition = position
 
@@ -199,10 +199,11 @@ func (e *Engine) flushMemtable() error {
 		fmt.Sprintf("sstable_%04d.db", e.nextSSTableNumber),
 	)
 
-	table := sstable.NewSSTable(
+	table := sstable.NewSSTableWithSummaryDegree(
 		path,
 		e.config.BlockManager.BlockSize,
 		e.blockCache,
+		e.config.SSTable.SummaryDegree,
 	)
 
 	if err := table.WriteRecords(records); err != nil {
@@ -219,8 +220,8 @@ func (e *Engine) flushMemtable() error {
 	)
 
 	if e.lastWALPosition.SegmentNumber > 0 {
-		if err := e.wal.DeleteSegmentsBefore(e.lastWALPosition); err != nil {
-			return fmt.Errorf("neuspesno ciscenje WAL segmenata: %w", err)
+		if err := e.wal.SetLowWaterMark(e.lastWALPosition); err != nil {
+			return fmt.Errorf("neuspesno postavljanje low-water mark pozicije: %w", err)
 		}
 	}
 
@@ -291,9 +292,9 @@ func (e *Engine) loadSSTables() error {
 func (e *Engine) recoverFromWAL() error {
 	err := e.wal.Replay(func(record wal.Record) error {
 		if record.Tombstone {
-			e.memtable.Delete(record.Key)
+			e.memtable.DeleteWithTimestamp(record.Key, record.Timestamp)
 		} else {
-			e.memtable.Put(record.Key, record.Value)
+			e.memtable.PutWithTimestamp(record.Key, record.Value, record.Timestamp)
 		}
 
 		return nil
@@ -301,6 +302,14 @@ func (e *Engine) recoverFromWAL() error {
 
 	if err != nil {
 		return fmt.Errorf("neuspesan oporavak iz WAL-a: %w", err)
+	}
+
+	e.lastWALPosition = e.wal.CurrentPosition()
+
+	if e.memtable.IsFull() {
+		if err := e.flushMemtable(); err != nil {
+			return fmt.Errorf("neuspesan flush nakon WAL recovery-ja: %w", err)
+		}
 	}
 
 	return nil
@@ -318,9 +327,10 @@ func (e *Engine) PrintState() {
 	} else {
 		for _, record := range memtableRecords {
 			fmt.Printf(
-				"  key=%s value=%s tombstone=%t\n",
+				"  key=%s value=%s timestamp=%d tombstone=%t\n",
 				record.Key,
 				string(record.Value),
+				record.Timestamp,
 				record.Tombstone,
 			)
 		}
@@ -368,6 +378,15 @@ func (e *Engine) PrintState() {
 		position.Offset,
 	)
 
+	lowWaterMark := e.wal.LowWaterMark()
+
+	fmt.Printf(
+		"  low-water mark: segment=%d block=%d offset=%d\n",
+		lowWaterMark.SegmentNumber,
+		lowWaterMark.BlockNumber,
+		lowWaterMark.Offset,
+	)
+
 	segments, err := e.wal.SegmentNames()
 	if err != nil {
 		fmt.Println("  greska:", err)
@@ -391,4 +410,12 @@ func (e *Engine) PrintState() {
 
 	fmt.Println("=====================================")
 	fmt.Println()
+}
+
+func (e *Engine) ValidateSSTable(number int) (sstable.MerkleValidation, error) {
+	if number < 1 || number > len(e.sstables) {
+		return sstable.MerkleValidation{}, fmt.Errorf("SSTable broj %d ne postoji", number)
+	}
+
+	return e.sstables[number-1].ValidateMerkle()
 }

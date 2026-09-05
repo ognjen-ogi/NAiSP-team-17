@@ -11,6 +11,8 @@ import (
 	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockmanager"
 )
 
+const lowWaterMarkFileName = "lwm.meta"
+
 type Position struct {
 	SegmentNumber int
 	BlockNumber   int64
@@ -24,6 +26,7 @@ type WAL struct {
 	segmentBlockCount int64
 	currentPosition   Position
 	currentBlock      []byte
+	lowWaterMark      Position
 }
 
 type segmentInfo struct {
@@ -64,10 +67,31 @@ func NewWAL(
 			Offset:        0,
 		},
 		currentBlock: make([]byte, blockSize),
+		lowWaterMark: Position{
+			SegmentNumber: 1,
+			BlockNumber:   0,
+			Offset:        0,
+		},
 	}
+
+	lowWaterMark, err := w.loadLowWaterMark()
+	if err != nil {
+		return nil, err
+	}
+
+	w.lowWaterMark = lowWaterMark
 
 	if err := w.restoreWritePosition(); err != nil {
 		return nil, err
+	}
+
+	if positionBefore(w.currentPosition, w.lowWaterMark) {
+		if w.lowWaterMark.BlockNumber != 0 || w.lowWaterMark.Offset != 0 {
+			return nil, fmt.Errorf("WAL pozicija je pre low-water mark pozicije")
+		}
+
+		w.currentPosition = w.lowWaterMark
+		w.currentBlock = make([]byte, blockSize)
 	}
 
 	return w, nil
@@ -201,9 +225,15 @@ func (w *WAL) Replay(apply func(Record) error) error {
 
 	var recordData []byte
 	assembling := false
-	skipOrphanFragments := len(segments) > 0 && segments[0].number > 1
+
+	skipOrphanFragments := len(segments) > 0 &&
+		segments[0].number > w.lowWaterMark.SegmentNumber
 
 	for _, segment := range segments {
+		if segment.number < w.lowWaterMark.SegmentNumber {
+			continue
+		}
+
 		info, err := os.Stat(segment.path)
 		if err != nil {
 			return err
@@ -211,17 +241,33 @@ func (w *WAL) Replay(apply func(Record) error) error {
 
 		blockCount := info.Size() / int64(w.blockSize)
 
-		for blockNumber := int64(0); blockNumber < blockCount; blockNumber++ {
+		startBlock := int64(0)
+
+		if segment.number == w.lowWaterMark.SegmentNumber {
+			startBlock = w.lowWaterMark.BlockNumber
+		}
+
+		for blockNumber := startBlock; blockNumber < blockCount; blockNumber++ {
 			block, err := w.blockManager.ReadBlock(
 				segment.path,
 				blockNumber,
 			)
-
 			if err != nil {
 				return err
 			}
 
-			fragments, err := parseBlock(block)
+			startOffset := 0
+
+			if segment.number == w.lowWaterMark.SegmentNumber &&
+				blockNumber == w.lowWaterMark.BlockNumber {
+				startOffset = w.lowWaterMark.Offset
+			}
+
+			if startOffset < 0 || startOffset > len(block) {
+				return fmt.Errorf("neispravan low-water mark offset")
+			}
+
+			fragments, err := parseBlock(block[startOffset:])
 			if err != nil {
 				return err
 			}
@@ -244,6 +290,7 @@ func (w *WAL) Replay(apply func(Record) error) error {
 					if err := apply(record); err != nil {
 						return err
 					}
+
 				case FragmentFirst:
 					if assembling {
 						recordData = recordData[:0]
@@ -365,11 +412,24 @@ func (w *WAL) restoreWritePosition() error {
 	return nil
 }
 
-func (w *WAL) DeleteSegmentsBefore(lowWaterMark Position) error {
-	if lowWaterMark.SegmentNumber < 1 ||
-		lowWaterMark.SegmentNumber > w.currentPosition.SegmentNumber {
+func (w *WAL) SetLowWaterMark(lowWaterMark Position) error {
+	if !w.validPosition(lowWaterMark) {
 		return fmt.Errorf("neispravna low-water mark pozicija")
 	}
+
+	if positionBefore(w.currentPosition, lowWaterMark) {
+		return fmt.Errorf("low-water mark ne moze biti posle trenutne WAL pozicije")
+	}
+
+	if positionBefore(lowWaterMark, w.lowWaterMark) {
+		return fmt.Errorf("low-water mark ne moze da se pomera unazad")
+	}
+
+	if err := w.saveLowWaterMark(lowWaterMark); err != nil {
+		return err
+	}
+
+	w.lowWaterMark = lowWaterMark
 
 	segments, err := w.listSegments()
 	if err != nil {
@@ -406,4 +466,84 @@ func (w *WAL) SegmentNames() ([]string, error) {
 	}
 
 	return names, nil
+}
+
+func (w *WAL) lowWaterMarkPath() string {
+	return filepath.Join(w.directory, lowWaterMarkFileName)
+}
+
+func (w *WAL) saveLowWaterMark(position Position) error {
+	data := []byte(fmt.Sprintf(
+		"%d %d %d\n",
+		position.SegmentNumber,
+		position.BlockNumber,
+		position.Offset,
+	))
+
+	if err := os.WriteFile(w.lowWaterMarkPath(), data, 0644); err != nil {
+		return fmt.Errorf("neuspesno cuvanje low-water mark pozicije: %w", err)
+	}
+
+	return nil
+}
+
+func (w *WAL) loadLowWaterMark() (Position, error) {
+	defaultPosition := Position{
+		SegmentNumber: 1,
+		BlockNumber:   0,
+		Offset:        0,
+	}
+
+	data, err := os.ReadFile(w.lowWaterMarkPath())
+	if os.IsNotExist(err) {
+		return defaultPosition, nil
+	}
+
+	if err != nil {
+		return Position{}, fmt.Errorf("neuspesno citanje low-water mark pozicije: %w", err)
+	}
+
+	var position Position
+
+	_, err = fmt.Sscanf(
+		string(data),
+		"%d %d %d",
+		&position.SegmentNumber,
+		&position.BlockNumber,
+		&position.Offset,
+	)
+
+	if err != nil {
+		return Position{}, fmt.Errorf("neispravna low-water mark pozicija: %w", err)
+	}
+
+	if !w.validPosition(position) {
+		return Position{}, fmt.Errorf("neispravna low-water mark pozicija")
+	}
+
+	return position, nil
+}
+
+func (w *WAL) validPosition(position Position) bool {
+	return position.SegmentNumber >= 1 &&
+		position.BlockNumber >= 0 &&
+		position.BlockNumber < w.segmentBlockCount &&
+		position.Offset >= 0 &&
+		position.Offset < w.blockSize
+}
+
+func positionBefore(first Position, second Position) bool {
+	if first.SegmentNumber != second.SegmentNumber {
+		return first.SegmentNumber < second.SegmentNumber
+	}
+
+	if first.BlockNumber != second.BlockNumber {
+		return first.BlockNumber < second.BlockNumber
+	}
+
+	return first.Offset < second.Offset
+}
+
+func (w *WAL) LowWaterMark() Position {
+	return w.lowWaterMark
 }

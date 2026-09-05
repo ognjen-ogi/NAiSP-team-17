@@ -26,6 +26,7 @@ const (
 type Record struct {
 	Key       string
 	Value     []byte
+	Timestamp int64
 	Tombstone bool
 }
 
@@ -88,66 +89,122 @@ func (s *SSTable) WriteRecords(records []memtable.FlushRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
+
 	ordered := append([]memtable.FlushRecord(nil), records...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Key < ordered[j].Key })
+
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].Key < ordered[j].Key
+	})
+
 	var data bytes.Buffer
+
 	entries := make([]IndexEntry, 0, len(ordered))
 	leaves := make([][sha256.Size]byte, 0, len(ordered))
 	filter := newBloomFilter(len(ordered))
+
 	for _, rec := range ordered {
 		filter.Add(rec.Key)
-		leaves = append(leaves, sha256.Sum256(rec.Value))
+
+		record := Record{
+			Key:       rec.Key,
+			Value:     rec.Value,
+			Timestamp: rec.Timestamp,
+			Tombstone: rec.Tombstone,
+		}
+
+		leaves = append(leaves, hashRecord(record))
+
 		offset := uint64(data.Len())
-		payload := serializeRecord(Record{Key: rec.Key, Value: rec.Value, Tombstone: rec.Tombstone})
+		payload := serializeRecord(record)
+
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(payload)))
+
 		data.Write(length[:])
 		data.Write(payload)
-		entries = append(entries, IndexEntry{Key: rec.Key, Offset: offset})
+
+		entries = append(entries, IndexEntry{
+			Key:    rec.Key,
+			Offset: offset,
+		})
 	}
+
 	index, err := serializeIndex(entries)
 	if err != nil {
 		return err
 	}
+
 	summary, err := serializeSummary(entries, s.summaryDegree)
 	if err != nil {
 		return err
 	}
+
 	bloom := serializeBloom(filter)
+
 	metadata, err := serializeMerkleMetadata(leaves)
 	if err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil && filepath.Dir(s.path) != "." {
 		return err
 	}
+
 	next := uint64(1)
+
 	dataStart, err := s.writeSection(next, data.Bytes())
 	if err != nil {
 		return err
 	}
+
 	next = dataStart + sectionBlocks(uint64(data.Len()), uint64(s.blockSize))
+
 	indexStart, err := s.writeSection(next, index)
 	if err != nil {
 		return err
 	}
+
 	next = indexStart + sectionBlocks(uint64(len(index)), uint64(s.blockSize))
+
 	summaryStart, err := s.writeSection(next, summary)
 	if err != nil {
 		return err
 	}
+
 	next = summaryStart + sectionBlocks(uint64(len(summary)), uint64(s.blockSize))
+
 	bloomStart, err := s.writeSection(next, bloom)
 	if err != nil {
 		return err
 	}
+
 	next = bloomStart + sectionBlocks(uint64(len(bloom)), uint64(s.blockSize))
+
 	metadataStart, err := s.writeSection(next, metadata)
 	if err != nil {
 		return err
 	}
-	header := tableHeader{SummaryDegree: uint32(s.summaryDegree), RecordCount: uint64(len(entries)), DataStart: dataStart, DataLength: uint64(data.Len()), IndexStart: indexStart, IndexLength: uint64(len(index)), SummaryStart: summaryStart, SummaryLength: uint64(len(summary)), BloomStart: bloomStart, BloomLength: uint64(len(bloom)), MetadataStart: metadataStart, MetadataLength: uint64(len(metadata))}
-	return s.manager.WriteBlock(s.path, 0, encodeHeader(s.blockSize, header))
+
+	header := tableHeader{
+		SummaryDegree:  uint32(s.summaryDegree),
+		RecordCount:    uint64(len(entries)),
+		DataStart:      dataStart,
+		DataLength:     uint64(data.Len()),
+		IndexStart:     indexStart,
+		IndexLength:    uint64(len(index)),
+		SummaryStart:   summaryStart,
+		SummaryLength:  uint64(len(summary)),
+		BloomStart:     bloomStart,
+		BloomLength:    uint64(len(bloom)),
+		MetadataStart:  metadataStart,
+		MetadataLength: uint64(len(metadata)),
+	}
+
+	return s.manager.WriteBlock(
+		s.path,
+		0,
+		encodeHeader(s.blockSize, header),
+	)
 }
 
 func (s *SSTable) Write(records []memtable.FlushRecord) error { return s.WriteRecords(records) }
@@ -163,51 +220,48 @@ func (s *SSTable) Get(key string) ([]byte, bool, bool, error) {
 	if s == nil {
 		return nil, false, false, errors.New("sstable je nil")
 	}
+
 	h, err := s.readHeader()
 	if err != nil {
 		if errors.Is(err, errLegacyTable) {
 			return s.getLegacy(key)
 		}
+
 		return nil, false, false, err
 	}
+
 	bloom, err := s.readBloom(h)
 	if err != nil {
 		return nil, false, false, err
 	}
+
 	if !bloom.MightContain(key) {
 		return nil, false, false, nil
 	}
-	summary, err := s.readSummary(h)
+
+	startOffset, possible, err := s.findSummaryIndexOffset(h, key)
 	if err != nil {
 		return nil, false, false, err
 	}
-	if len(summary) > 0 && (key < summary[0].Key || key > summary[len(summary)-1].Key) {
+
+	if !possible {
 		return nil, false, false, nil
 	}
-	index, err := s.readIndex(h)
+
+	indexEntry, found, err := s.findIndexEntry(h, key, startOffset)
 	if err != nil {
 		return nil, false, false, err
 	}
-	start, end := 0, len(index)
-	for _, entry := range summary {
-		if entry.Key <= key {
-			start = int(entry.IndexOffset)
-			continue
-		}
-		end = int(entry.IndexOffset) + 1
-		break
-	}
-	if start > end || start < 0 || end > len(index) {
-		return nil, false, false, errors.New("neispravan Summary opseg")
-	}
-	position := start + sort.Search(end-start, func(i int) bool { return index[start+i].Key >= key })
-	if position == end || index[position].Key != key {
+
+	if !found {
 		return nil, false, false, nil
 	}
-	record, err := s.readRecord(h, index[position].Offset)
+
+	record, err := s.readRecord(h, indexEntry.Offset)
 	if err != nil {
 		return nil, false, false, err
 	}
+
 	return record.Value, record.Tombstone, true, nil
 }
 
@@ -307,20 +361,6 @@ func (s *SSTable) readBloom(h tableHeader) (BloomFilter, error) {
 	}
 	return deserializeBloom(data)
 }
-func (s *SSTable) readIndex(h tableHeader) ([]IndexEntry, error) {
-	data, err := s.readSection(h.IndexStart, h.IndexLength)
-	if err != nil {
-		return nil, err
-	}
-	return deserializeIndex(data)
-}
-func (s *SSTable) readSummary(h tableHeader) ([]SummaryEntry, error) {
-	data, err := s.readSection(h.SummaryStart, h.SummaryLength)
-	if err != nil {
-		return nil, err
-	}
-	return deserializeSummary(data)
-}
 
 func (s *SSTable) readRecord(h tableHeader, offset uint64) (Record, error) {
 	lengthBytes, err := s.readAt(h.DataStart, h.DataLength, offset, 4)
@@ -339,9 +379,164 @@ func (s *SSTable) readRecord(h tableHeader, offset uint64) (Record, error) {
 	return records[0], nil
 }
 
+func (s *SSTable) readSummaryEntry(h tableHeader, offset uint64) (SummaryEntry, uint64, error) {
+	if offset >= h.SummaryLength {
+		return SummaryEntry{}, 0, errors.New("Summary offset je van opsega")
+	}
+
+	lengthBytes, err := s.readAt(
+		h.SummaryStart,
+		h.SummaryLength,
+		offset,
+		4,
+	)
+	if err != nil {
+		return SummaryEntry{}, 0, err
+	}
+
+	keyLength := uint64(binary.BigEndian.Uint32(lengthBytes))
+	entryLength := uint64(4) + keyLength + 8
+
+	if offset+entryLength > h.SummaryLength {
+		return SummaryEntry{}, 0, errors.New("neispravan Summary zapis")
+	}
+
+	keyBytes, err := s.readAt(
+		h.SummaryStart,
+		h.SummaryLength,
+		offset+4,
+		keyLength,
+	)
+	if err != nil {
+		return SummaryEntry{}, 0, err
+	}
+
+	indexOffsetBytes, err := s.readAt(
+		h.SummaryStart,
+		h.SummaryLength,
+		offset+4+keyLength,
+		8,
+	)
+	if err != nil {
+		return SummaryEntry{}, 0, err
+	}
+
+	entry := SummaryEntry{
+		Key:         string(keyBytes),
+		IndexOffset: binary.BigEndian.Uint64(indexOffsetBytes),
+	}
+
+	return entry, offset + entryLength, nil
+}
+
+func (s *SSTable) findSummaryIndexOffset(h tableHeader, key string) (uint64, bool, error) {
+	if h.SummaryLength == 0 {
+		return 0, true, nil
+	}
+
+	offset := uint64(0)
+	indexOffset := uint64(0)
+	first := true
+
+	for offset < h.SummaryLength {
+		entry, nextOffset, err := s.readSummaryEntry(h, offset)
+		if err != nil {
+			return 0, false, err
+		}
+
+		if first && key < entry.Key {
+			return 0, false, nil
+		}
+
+		if entry.Key > key {
+			return indexOffset, true, nil
+		}
+
+		indexOffset = entry.IndexOffset
+		first = false
+		offset = nextOffset
+	}
+
+	return indexOffset, true, nil
+}
+
+func (s *SSTable) readIndexEntry(h tableHeader, offset uint64) (IndexEntry, uint64, error) {
+	if offset >= h.IndexLength {
+		return IndexEntry{}, 0, errors.New("Index offset je van opsega")
+	}
+
+	lengthBytes, err := s.readAt(
+		h.IndexStart,
+		h.IndexLength,
+		offset,
+		4,
+	)
+	if err != nil {
+		return IndexEntry{}, 0, err
+	}
+
+	keyLength := uint64(binary.BigEndian.Uint32(lengthBytes))
+
+	entryLength := uint64(4) + keyLength + 8
+
+	if offset+entryLength > h.IndexLength {
+		return IndexEntry{}, 0, errors.New("neispravan Index zapis")
+	}
+
+	keyBytes, err := s.readAt(
+		h.IndexStart,
+		h.IndexLength,
+		offset+4,
+		keyLength,
+	)
+	if err != nil {
+		return IndexEntry{}, 0, err
+	}
+
+	dataOffsetBytes, err := s.readAt(
+		h.IndexStart,
+		h.IndexLength,
+		offset+4+keyLength,
+		8,
+	)
+	if err != nil {
+		return IndexEntry{}, 0, err
+	}
+
+	entry := IndexEntry{
+		Key:    string(keyBytes),
+		Offset: binary.BigEndian.Uint64(dataOffsetBytes),
+	}
+
+	return entry, offset + entryLength, nil
+}
+
+func (s *SSTable) findIndexEntry(h tableHeader, key string, startOffset uint64) (IndexEntry, bool, error) {
+	offset := startOffset
+
+	for offset < h.IndexLength {
+		entry, nextOffset, err := s.readIndexEntry(h, offset)
+		if err != nil {
+			return IndexEntry{}, false, err
+		}
+
+		if entry.Key == key {
+			return entry, true, nil
+		}
+
+		if entry.Key > key {
+			return IndexEntry{}, false, nil
+		}
+
+		offset = nextOffset
+	}
+
+	return IndexEntry{}, false, nil
+}
+
 func (s *SSTable) readAt(sectionStart, sectionLength, offset, length uint64) ([]byte, error) {
 	if offset+length > sectionLength {
-		return nil, errors.New("Data offset je van opsega")
+		return nil, errors.New("offset je van opsega sekcije")
 	}
 	out := make([]byte, 0, int(length))
 	for length > 0 {
@@ -366,49 +561,100 @@ func (s *SSTable) ValidateMerkle() (MerkleValidation, error) {
 	if s == nil {
 		return MerkleValidation{}, errors.New("sstable je nil")
 	}
+
 	h, err := s.readHeader()
 	if err != nil {
 		if errors.Is(err, errLegacyTable) {
 			return MerkleValidation{}, errors.New("SSTable nema Merkle metadata")
 		}
+
 		return MerkleValidation{}, err
 	}
-	metadata, err := s.readSection(h.MetadataStart, h.MetadataLength)
+
+	metadata, err := s.readSection(
+		h.MetadataStart,
+		h.MetadataLength,
+	)
 	if err != nil {
 		return MerkleValidation{}, err
 	}
+
 	leaves, expectedRoot, err := deserializeMerkleMetadata(metadata)
 	if err != nil {
 		return MerkleValidation{}, err
 	}
+
 	if uint64(len(leaves)) != h.RecordCount {
-		return MerkleValidation{}, errors.New("Merkle metadata ne odgovara broju zapisa")
-	}
-	index, err := s.readIndex(h)
-	if err != nil {
-		return MerkleValidation{}, err
-	}
-	if len(index) != len(leaves) {
-		return MerkleValidation{}, errors.New("Merkle metadata ne odgovara Index strukturi")
+		return MerkleValidation{}, errors.New(
+			"Merkle metadata ne odgovara broju zapisa",
+		)
 	}
 
 	currentLeaves := make([][sha256.Size]byte, len(leaves))
-	result := MerkleValidation{Valid: true}
-	for i, entry := range index {
-		record, err := s.readRecord(h, entry.Offset)
-		if err != nil {
-			return MerkleValidation{}, fmt.Errorf("ne mogu da validiram Data zapis %d: %w", i, err)
-		}
-		currentLeaves[i] = sha256.Sum256(record.Value)
-		if currentLeaves[i] != leaves[i] {
-			result.Valid = false
-			result.ChangedRecords = append(result.ChangedRecords, i)
-		}
+
+	result := MerkleValidation{
+		Valid: true,
 	}
+
+	indexOffset := uint64(0)
+	recordNumber := 0
+
+	for indexOffset < h.IndexLength {
+		if recordNumber >= len(leaves) {
+			return MerkleValidation{}, errors.New(
+				"Merkle metadata ne odgovara Index strukturi",
+			)
+		}
+
+		entry, nextOffset, err := s.readIndexEntry(
+			h,
+			indexOffset,
+		)
+		if err != nil {
+			return MerkleValidation{}, err
+		}
+
+		record, err := s.readRecord(
+			h,
+			entry.Offset,
+		)
+		if err != nil {
+			return MerkleValidation{}, fmt.Errorf(
+				"ne mogu da validiram Data zapis %d: %w",
+				recordNumber,
+				err,
+			)
+		}
+
+		currentLeaves[recordNumber] = hashRecord(record)
+
+		if currentLeaves[recordNumber] != leaves[recordNumber] {
+			result.Valid = false
+			result.ChangedRecords = append(
+				result.ChangedRecords,
+				recordNumber,
+			)
+		}
+
+		recordNumber++
+		indexOffset = nextOffset
+	}
+
+	if recordNumber != len(leaves) {
+		return MerkleValidation{}, errors.New(
+			"Merkle metadata ne odgovara Index strukturi",
+		)
+	}
+
 	if calculateMerkleRoot(currentLeaves) != expectedRoot {
 		result.Valid = false
 	}
+
 	return result, nil
+}
+
+func hashRecord(record Record) [sha256.Size]byte {
+	return sha256.Sum256(serializeRecord(record))
 }
 
 func (s *SSTable) ValidateMetadata() (MerkleValidation, error) { return s.ValidateMerkle() }
@@ -549,56 +795,32 @@ func serializeIndex(entries []IndexEntry) ([]byte, error) {
 	}
 	return out.Bytes(), nil
 }
-func deserializeIndex(data []byte) ([]IndexEntry, error) {
-	var result []IndexEntry
-	for len(data) > 0 {
-		key, rest, err := readString(data)
-		if err != nil {
-			return nil, err
-		}
-		if len(rest) < 8 {
-			return nil, errors.New("neispravan Index")
-		}
-		result = append(result, IndexEntry{Key: key, Offset: binary.BigEndian.Uint64(rest[:8])})
-		data = rest[8:]
-	}
-	return result, nil
-}
+
 func serializeSummary(entries []IndexEntry, degree int) ([]byte, error) {
+	if degree <= 0 {
+		return nil, errors.New("stepen Summary strukture mora biti veci od nule")
+	}
+
 	var out bytes.Buffer
-	for i := 0; i < len(entries); i += degree {
-		if err := writeString(&out, entries[i].Key); err != nil {
-			return nil, err
+	var indexOffset uint64
+
+	for i, entry := range entries {
+		if i%degree == 0 || i == len(entries)-1 {
+			if err := writeString(&out, entry.Key); err != nil {
+				return nil, err
+			}
+
+			var offset [8]byte
+			binary.BigEndian.PutUint64(offset[:], indexOffset)
+			out.Write(offset[:])
 		}
-		var offset [8]byte
-		binary.BigEndian.PutUint64(offset[:], uint64(i))
-		out.Write(offset[:])
+
+		indexOffset += uint64(4 + len(entry.Key) + 8)
 	}
-	if len(entries) > 0 && (len(entries)-1)%degree != 0 {
-		if err := writeString(&out, entries[len(entries)-1].Key); err != nil {
-			return nil, err
-		}
-		var offset [8]byte
-		binary.BigEndian.PutUint64(offset[:], uint64(len(entries)-1))
-		out.Write(offset[:])
-	}
+
 	return out.Bytes(), nil
 }
-func deserializeSummary(data []byte) ([]SummaryEntry, error) {
-	var result []SummaryEntry
-	for len(data) > 0 {
-		key, rest, err := readString(data)
-		if err != nil {
-			return nil, err
-		}
-		if len(rest) < 8 {
-			return nil, errors.New("neispravan Summary")
-		}
-		result = append(result, SummaryEntry{Key: key, IndexOffset: binary.BigEndian.Uint64(rest[:8])})
-		data = rest[8:]
-	}
-	return result, nil
-}
+
 func writeString(out *bytes.Buffer, value string) error {
 	if uint64(len(value)) > uint64(^uint32(0)) {
 		return errors.New("string je predugacak")
@@ -623,53 +845,88 @@ func readString(data []byte) (string, []byte, error) {
 func serializeRecord(r Record) []byte {
 	keyBytes := []byte(r.Key)
 	valueBytes := append([]byte(nil), r.Value...)
+
 	var out bytes.Buffer
+
+	var timestamp [8]byte
+	binary.BigEndian.PutUint64(timestamp[:], uint64(r.Timestamp))
+	out.Write(timestamp[:])
+
 	var length [4]byte
+
 	binary.BigEndian.PutUint32(length[:], uint32(len(keyBytes)))
 	out.Write(length[:])
 	out.Write(keyBytes)
+
 	if r.Tombstone {
 		out.WriteByte(1)
 	} else {
 		out.WriteByte(0)
 	}
+
 	binary.BigEndian.PutUint32(length[:], uint32(len(valueBytes)))
 	out.Write(length[:])
 	out.Write(valueBytes)
+
 	return out.Bytes()
 }
 func parseRecords(block []byte) ([]Record, error) {
 	var records []Record
+
 	for i := 0; i < len(block); {
+		if i+8 > len(block) {
+			break
+		}
+
+		timestamp := int64(binary.BigEndian.Uint64(block[i : i+8]))
+		i += 8
+
 		if i+4 > len(block) {
 			break
 		}
+
 		keyLen := int(binary.BigEndian.Uint32(block[i : i+4]))
 		i += 4
+
 		if keyLen == 0 {
 			break
 		}
+
 		if i+keyLen > len(block) {
 			break
 		}
+
 		key := string(block[i : i+keyLen])
 		i += keyLen
+
 		if i >= len(block) {
 			break
 		}
+
 		tombstone := block[i] == 1
 		i++
+
 		if i+4 > len(block) {
 			break
 		}
+
 		valueLen := int(binary.BigEndian.Uint32(block[i : i+4]))
 		i += 4
+
 		if i+valueLen > len(block) {
 			break
 		}
+
 		value := append([]byte(nil), block[i:i+valueLen]...)
 		i += valueLen
-		records = append(records, Record{Key: key, Value: value, Tombstone: tombstone})
+
+		records = append(records, Record{
+			Key:       key,
+			Value:     value,
+			Timestamp: timestamp,
+			Tombstone: tombstone,
+		})
 	}
+
 	return records, nil
 }
