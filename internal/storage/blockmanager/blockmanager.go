@@ -35,6 +35,9 @@ func (bm *BlockManager) ReadBlock(path string, blockNumber int64) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("Ne mogu da procitam blok %d:%w", blockNumber, err)
 	}
+
+	bm.cache.Put(path, blockNumber, buffer)
+
 	return buffer, nil
 
 }
