@@ -219,8 +219,8 @@ func (e *Engine) flushMemtable() error {
 	)
 
 	if e.lastWALPosition.SegmentNumber > 0 {
-		if err := e.wal.DeleteSegmentsBefore(e.lastWALPosition); err != nil {
-			return fmt.Errorf("neuspesno ciscenje WAL segmenata: %w", err)
+		if err := e.wal.SetLowWaterMark(e.lastWALPosition); err != nil {
+			return fmt.Errorf("neuspesno postavljanje low-water mark pozicije: %w", err)
 		}
 	}
 
@@ -303,6 +303,14 @@ func (e *Engine) recoverFromWAL() error {
 		return fmt.Errorf("neuspesan oporavak iz WAL-a: %w", err)
 	}
 
+	e.lastWALPosition = e.wal.CurrentPosition()
+
+	if e.memtable.IsFull() {
+		if err := e.flushMemtable(); err != nil {
+			return fmt.Errorf("neuspesan flush nakon WAL recovery-ja: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -366,6 +374,15 @@ func (e *Engine) PrintState() {
 		position.SegmentNumber,
 		position.BlockNumber,
 		position.Offset,
+	)
+
+	lowWaterMark := e.wal.LowWaterMark()
+
+	fmt.Printf(
+		"  low-water mark: segment=%d block=%d offset=%d\n",
+		lowWaterMark.SegmentNumber,
+		lowWaterMark.BlockNumber,
+		lowWaterMark.Offset,
 	)
 
 	segments, err := e.wal.SegmentNames()

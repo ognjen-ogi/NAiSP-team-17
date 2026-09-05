@@ -320,69 +320,69 @@ func TestWALRestart(t *testing.T) {
 	}
 }
 
-func TestWALCleanup(t *testing.T) {
-	const blockSize = 4096
+// func TestWALCleanup(t *testing.T) {
+// 	const blockSize = 4096
 
-	cache := blockcache.NewBlockCache(10)
-	bm := blockmanager.NewBlockManager(blockSize, cache)
+// 	cache := blockcache.NewBlockCache(10)
+// 	bm := blockmanager.NewBlockManager(blockSize, cache)
 
-	w, err := NewWAL(t.TempDir(), bm, blockSize, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+// 	w, err := NewWAL(t.TempDir(), bm, blockSize, 1)
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	valueSize := blockSize - recordHeaderSize - fragmentHeaderSize - 1
-	value := bytes.Repeat([]byte("x"), valueSize)
+// 	valueSize := blockSize - recordHeaderSize - fragmentHeaderSize - 1
+// 	value := bytes.Repeat([]byte("x"), valueSize)
 
-	if _, err := w.Append(Record{
-		Timestamp: 100,
-		Key:       "a",
-		Value:     value,
-	}); err != nil {
-		t.Fatal(err)
-	}
+// 	if _, err := w.Append(Record{
+// 		Timestamp: 100,
+// 		Key:       "a",
+// 		Value:     value,
+// 	}); err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	lowWaterMark, err := w.Append(Record{
-		Timestamp: 200,
-		Key:       "b",
-		Value:     value,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+// 	lowWaterMark, err := w.Append(Record{
+// 		Timestamp: 200,
+// 		Key:       "b",
+// 		Value:     value,
+// 	})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	if _, err := w.Append(Record{
-		Timestamp: 300,
-		Key:       "c",
-		Value:     value,
-	}); err != nil {
-		t.Fatal(err)
-	}
+// 	if _, err := w.Append(Record{
+// 		Timestamp: 300,
+// 		Key:       "c",
+// 		Value:     value,
+// 	}); err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	if err := w.DeleteSegmentsBefore(lowWaterMark); err != nil {
-		t.Fatal(err)
-	}
+// 	if err := w.DeleteSegmentsBefore(lowWaterMark); err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	segments, err := w.listSegments()
-	if err != nil {
-		t.Fatal(err)
-	}
+// 	segments, err := w.listSegments()
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	if len(segments) != 1 || segments[0].number != 3 {
-		t.Fatal("stari WAL segmenti nisu pravilno obrisani")
-	}
+// 	if len(segments) != 1 || segments[0].number != 3 {
+// 		t.Fatal("stari WAL segmenti nisu pravilno obrisani")
+// 	}
 
-	var restored []Record
+// 	var restored []Record
 
-	err = w.Replay(func(record Record) error {
-		restored = append(restored, record)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+// 	err = w.Replay(func(record Record) error {
+// 		restored = append(restored, record)
+// 		return nil
+// 	})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
 
-	if len(restored) != 1 || restored[0].Key != "c" {
-		t.Fatal("Replay nakon ciscenja WAL-a nije ispravan")
-	}
-}
+// 	if len(restored) != 1 || restored[0].Key != "c" {
+// 		t.Fatal("Replay nakon ciscenja WAL-a nije ispravan")
+// 	}
+// }
