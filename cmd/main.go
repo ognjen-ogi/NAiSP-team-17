@@ -1,0 +1,100 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/engine"
+)
+
+func main() {
+	e, err := engine.New("config/config.yaml")
+	if err != nil {
+		fmt.Println("Greska pri pokretanju engine-a:", err)
+		return
+	}
+
+	scanner := bufio.NewScanner(os.Stdin)
+
+	fmt.Println("Key-Value Engine")
+	fmt.Println("Komande: PUT key value, GET key, DELETE key, EXIT")
+
+	for {
+		fmt.Print("> ")
+
+		if !scanner.Scan() {
+			break
+		}
+
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Fields(line)
+		command := strings.ToUpper(parts[0])
+
+		switch command {
+		case "PUT":
+			if len(parts) < 3 {
+				fmt.Println("Upotreba: PUT key value")
+				continue
+			}
+
+			key := parts[1]
+			value := []byte(strings.Join(parts[2:], " "))
+
+			if err := e.Put(key, value); err != nil {
+				fmt.Println("Greska:", err)
+				continue
+			}
+
+			fmt.Println("OK")
+
+		case "GET":
+			if len(parts) != 2 {
+				fmt.Println("Upotreba: GET key")
+				continue
+			}
+
+			value, found, err := e.Get(parts[1])
+			if err != nil {
+				fmt.Println("Greska:", err)
+				continue
+			}
+
+			if !found {
+				fmt.Println("Kljuc nije pronadjen")
+				continue
+			}
+
+			fmt.Println(string(value))
+
+		case "DELETE":
+			if len(parts) != 2 {
+				fmt.Println("Upotreba: DELETE key")
+				continue
+			}
+
+			if err := e.Delete(parts[1]); err != nil {
+				fmt.Println("Greska:", err)
+				continue
+			}
+
+			fmt.Println("OK")
+
+		case "EXIT":
+			fmt.Println("Kraj rada")
+			return
+
+		default:
+			fmt.Println("Nepoznata komanda")
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Println("Greska pri citanju ulaza:", err)
+	}
+}
