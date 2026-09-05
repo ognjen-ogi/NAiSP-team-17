@@ -141,3 +141,65 @@ func (s *SSTable) Read(key string) ([]byte, bool, error) {
 	value, _, found, err := s.Get(key)
 	return value, found, err
 }
+
+func (s *SSTable) Path() string {
+	return s.path
+}
+
+func serializeRecord(r Record) []byte {
+	keyBytes := []byte(r.Key)
+	valueBytes := append([]byte(nil), r.Value...)
+
+	var out bytes.Buffer
+	var lenBuf [4]byte
+
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(keyBytes)))
+	out.Write(lenBuf[:])
+	out.Write(keyBytes)
+	if r.Tombstone {
+		out.WriteByte(1)
+	} else {
+		out.WriteByte(0)
+	}
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(valueBytes)))
+	out.Write(lenBuf[:])
+	out.Write(valueBytes)
+	return out.Bytes()
+}
+
+func parseRecords(block []byte) ([]Record, error) {
+	var records []Record
+	for i := 0; i < len(block); {
+		if i+4 > len(block) {
+			break
+		}
+		keyLen := int(binary.BigEndian.Uint32(block[i : i+4]))
+		i += 4
+		if keyLen == 0 {
+			break
+		}
+		if i+keyLen > len(block) {
+			break
+		}
+		key := string(block[i : i+keyLen])
+		i += keyLen
+		if i >= len(block) {
+			break
+		}
+		tombstone := block[i] == 1
+		i++
+		if i+4 > len(block) {
+			break
+		}
+		valueLen := int(binary.BigEndian.Uint32(block[i : i+4]))
+		i += 4
+		if valueLen < 0 || i+valueLen > len(block) {
+			break
+		}
+		value := append([]byte(nil), block[i:i+valueLen]...)
+		i += valueLen
+		records = append(records, Record{Key: key, Value: value, Tombstone: tombstone})
+	}
+	return records, nil
+}
+
