@@ -90,6 +90,10 @@ func New(configPath string) (*Engine, error) {
 		return nil, err
 	}
 
+	if err := engine.recoverFromWAL(); err != nil {
+		return nil, err
+	}
+
 	return engine, nil
 }
 
@@ -279,6 +283,24 @@ func (e *Engine) loadSSTables() error {
 		if table.number >= e.nextSSTableNumber {
 			e.nextSSTableNumber = table.number + 1
 		}
+	}
+
+	return nil
+}
+
+func (e *Engine) recoverFromWAL() error {
+	err := e.wal.Replay(func(record wal.Record) error {
+		if record.Tombstone {
+			e.memtable.Delete(record.Key)
+		} else {
+			e.memtable.Put(record.Key, record.Value)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("neuspesan oporavak iz WAL-a: %w", err)
 	}
 
 	return nil
