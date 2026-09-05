@@ -270,3 +270,137 @@ func (s *SSTable) readSection(start, length uint64) ([]byte, error) {
 	}
 	return out, nil
 }
+func (s *SSTable) readBloom(h tableHeader) (BloomFilter, error) {
+	data, err := s.readSection(h.BloomStart, h.BloomLength)
+	if err != nil {
+		return BloomFilter{}, err
+	}
+	return deserializeBloom(data)
+}
+func (s *SSTable) readIndex(h tableHeader) ([]IndexEntry, error) {
+	data, err := s.readSection(h.IndexStart, h.IndexLength)
+	if err != nil {
+		return nil, err
+	}
+	return deserializeIndex(data)
+}
+func (s *SSTable) readSummary(h tableHeader) ([]SummaryEntry, error) {
+	data, err := s.readSection(h.SummaryStart, h.SummaryLength)
+	if err != nil {
+		return nil, err
+	}
+	return deserializeSummary(data)
+}
+
+func (s *SSTable) readRecord(h tableHeader, offset uint64) (Record, error) {
+	lengthBytes, err := s.readAt(h.DataStart, h.DataLength, offset, 4)
+	if err != nil {
+		return Record{}, err
+	}
+	length := uint64(binary.BigEndian.Uint32(lengthBytes))
+	payload, err := s.readAt(h.DataStart, h.DataLength, offset+4, length)
+	if err != nil {
+		return Record{}, err
+	}
+	records, err := parseRecords(payload)
+	if err != nil || len(records) != 1 {
+		return Record{}, errors.New("neispravan Data zapis")
+	}
+	return records[0], nil
+}
+
+func (s *SSTable) readAt(sectionStart, sectionLength, offset, length uint64) ([]byte, error) {
+	if offset+length > sectionLength {
+		return nil, errors.New("Data offset je van opsega")
+	}
+	out := make([]byte, 0, int(length))
+	for length > 0 {
+		blockNumber := offset / uint64(s.blockSize)
+		inBlock := offset % uint64(s.blockSize)
+		block, err := s.manager.ReadBlock(s.path, int64(sectionStart+blockNumber))
+		if err != nil {
+			return nil, err
+		}
+		take := uint64(len(block)) - inBlock
+		if take > length {
+			take = length
+		}
+		out = append(out, block[inBlock:inBlock+take]...)
+		offset += take
+		length -= take
+	}
+	return out, nil
+}
+
+func (s *SSTable) getLegacy(key string) ([]byte, bool, bool, error) {
+	info, err := os.Stat(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, false, nil
+		}
+		return nil, false, false, err
+	}
+	blocks := int64((info.Size() + int64(s.blockSize) - 1) / int64(s.blockSize))
+	for i := int64(0); i < blocks; i++ {
+		block, err := s.manager.ReadBlock(s.path, i)
+		if err != nil {
+			return nil, false, false, err
+		}
+		records, err := parseRecords(block)
+		if err != nil {
+			return nil, false, false, err
+		}
+		for _, record := range records {
+			if record.Key == key {
+				return record.Value, record.Tombstone, true, nil
+			}
+		}
+	}
+	return nil, false, false, nil
+}
+
+func newBloomFilter(count int) BloomFilter {
+	size := count * 10
+	if size < 64 {
+		size = 64
+	}
+	return BloomFilter{Bits: make([]byte, (size+7)/8), HashCount: 4}
+}
+func (b *BloomFilter) Add(key string) {
+	for _, position := range b.positions(key) {
+		b.Bits[position/8] |= 1 << (position % 8)
+	}
+}
+func (b BloomFilter) MightContain(key string) bool {
+	for _, position := range b.positions(key) {
+		if b.Bits[position/8]&(1<<(position%8)) == 0 {
+			return false
+		}
+	}
+	return true
+}
+func (b BloomFilter) positions(key string) []uint64 {
+	if len(b.Bits) == 0 {
+		return nil
+	}
+	result := make([]uint64, b.HashCount)
+	for i := range result {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(fmt.Sprintf("%d:%s", i, key)))
+		result[i] = h.Sum64() % uint64(len(b.Bits)*8)
+	}
+	return result
+}
+func serializeBloom(b BloomFilter) []byte {
+	out := make([]byte, 4+len(b.Bits))
+	binary.BigEndian.PutUint32(out[:4], b.HashCount)
+	copy(out[4:], b.Bits)
+	return out
+}
+func deserializeBloom(data []byte) (BloomFilter, error) {
+	if len(data) < 4 {
+		return BloomFilter{}, errors.New("neispravan Bloom Filter")
+	}
+	return BloomFilter{HashCount: binary.BigEndian.Uint32(data[:4]), Bits: append([]byte(nil), data[4:]...)}, nil
+}
+
