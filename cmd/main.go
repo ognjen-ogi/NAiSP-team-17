@@ -52,6 +52,7 @@ func main() {
 			}
 
 			fmt.Println("OK")
+			e.PrintState()
 
 		case "GET":
 			if len(parts) != 2 {
@@ -67,10 +68,12 @@ func main() {
 
 			if !found {
 				fmt.Println("Kljuc nije pronadjen")
+				e.PrintState()
 				continue
 			}
 
 			fmt.Println(string(value))
+			e.PrintState()
 
 		case "DELETE":
 			if len(parts) != 2 {
@@ -84,6 +87,7 @@ func main() {
 			}
 
 			fmt.Println("OK")
+			e.PrintState()
 
 		case "EXIT":
 			fmt.Println("Kraj rada")

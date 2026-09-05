@@ -305,3 +305,90 @@ func (e *Engine) recoverFromWAL() error {
 
 	return nil
 }
+
+func (e *Engine) PrintState() {
+	fmt.Println()
+	fmt.Println("========== STANJE ENGINE-A ==========")
+
+	fmt.Println("MEMTABLE:")
+	memtableRecords := e.memtable.Flush()
+
+	if len(memtableRecords) == 0 {
+		fmt.Println("  prazna")
+	} else {
+		for _, record := range memtableRecords {
+			fmt.Printf(
+				"  key=%s value=%s tombstone=%t\n",
+				record.Key,
+				string(record.Value),
+				record.Tombstone,
+			)
+		}
+	}
+
+	fmt.Println("RESULT CACHE:")
+	cacheEntries := e.cache.DebugEntries()
+
+	if len(cacheEntries) == 0 {
+		fmt.Println("  prazan")
+	} else {
+		for _, entry := range cacheEntries {
+			fmt.Printf(
+				"  key=%s value=%s tombstone=%t\n",
+				entry.Key,
+				string(entry.Value),
+				entry.Tombstone,
+			)
+		}
+	}
+
+	fmt.Println("BLOCK CACHE:")
+	blockEntries := e.blockCache.DebugEntries()
+
+	if len(blockEntries) == 0 {
+		fmt.Println("  prazan")
+	} else {
+		for _, entry := range blockEntries {
+			fmt.Printf(
+				"  path=%s block=%d size=%d\n",
+				entry.Path,
+				entry.BlockNumber,
+				entry.Size,
+			)
+		}
+	}
+
+	fmt.Println("WAL:")
+	position := e.wal.CurrentPosition()
+
+	fmt.Printf(
+		"  position: segment=%d block=%d offset=%d\n",
+		position.SegmentNumber,
+		position.BlockNumber,
+		position.Offset,
+	)
+
+	segments, err := e.wal.SegmentNames()
+	if err != nil {
+		fmt.Println("  greska:", err)
+	} else if len(segments) == 0 {
+		fmt.Println("  nema segmenata")
+	} else {
+		for _, segment := range segments {
+			fmt.Println(" ", segment)
+		}
+	}
+
+	fmt.Println("SSTABLES:")
+
+	if len(e.sstables) == 0 {
+		fmt.Println("  nema SSTable")
+	} else {
+		for i, table := range e.sstables {
+			fmt.Printf("  %d: %s\n", i+1, table.Path())
+		}
+	}
+
+	fmt.Println("=====================================")
+	fmt.Println()
+}
