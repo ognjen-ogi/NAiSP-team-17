@@ -110,7 +110,7 @@ func (e *Engine) Put(key string, value []byte) error {
 		return fmt.Errorf("neuspesan upis u WAL: %w", err)
 	}
 
-	e.memtable.Put(key, value)
+	e.memtable.PutWithTimestamp(key, value, record.Timestamp)
 	e.cache.Invalidate(key)
 	e.lastWALPosition = position
 
@@ -136,7 +136,7 @@ func (e *Engine) Delete(key string) error {
 		return fmt.Errorf("neuspesan upis brisanja u WAL: %w", err)
 	}
 
-	e.memtable.Delete(key)
+	e.memtable.DeleteWithTimestamp(key, record.Timestamp)
 	e.cache.Invalidate(key)
 	e.lastWALPosition = position
 
@@ -291,9 +291,9 @@ func (e *Engine) loadSSTables() error {
 func (e *Engine) recoverFromWAL() error {
 	err := e.wal.Replay(func(record wal.Record) error {
 		if record.Tombstone {
-			e.memtable.Delete(record.Key)
+			e.memtable.DeleteWithTimestamp(record.Key, record.Timestamp)
 		} else {
-			e.memtable.Put(record.Key, record.Value)
+			e.memtable.PutWithTimestamp(record.Key, record.Value, record.Timestamp)
 		}
 
 		return nil
@@ -326,9 +326,10 @@ func (e *Engine) PrintState() {
 	} else {
 		for _, record := range memtableRecords {
 			fmt.Printf(
-				"  key=%s value=%s tombstone=%t\n",
+				"  key=%s value=%s timestamp=%d tombstone=%t\n",
 				record.Key,
 				string(record.Value),
+				record.Timestamp,
 				record.Tombstone,
 			)
 		}

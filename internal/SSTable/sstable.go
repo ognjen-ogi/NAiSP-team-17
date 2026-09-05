@@ -26,6 +26,7 @@ const (
 type Record struct {
 	Key       string
 	Value     []byte
+	Timestamp int64
 	Tombstone bool
 }
 
@@ -98,7 +99,12 @@ func (s *SSTable) WriteRecords(records []memtable.FlushRecord) error {
 		filter.Add(rec.Key)
 		leaves = append(leaves, sha256.Sum256(rec.Value))
 		offset := uint64(data.Len())
-		payload := serializeRecord(Record{Key: rec.Key, Value: rec.Value, Tombstone: rec.Tombstone})
+		payload := serializeRecord(Record{
+			Key:       rec.Key,
+			Value:     rec.Value,
+			Timestamp: rec.Timestamp,
+			Tombstone: rec.Tombstone,
+		})
 		var length [4]byte
 		binary.BigEndian.PutUint32(length[:], uint32(len(payload)))
 		data.Write(length[:])
@@ -623,53 +629,88 @@ func readString(data []byte) (string, []byte, error) {
 func serializeRecord(r Record) []byte {
 	keyBytes := []byte(r.Key)
 	valueBytes := append([]byte(nil), r.Value...)
+
 	var out bytes.Buffer
+
+	var timestamp [8]byte
+	binary.BigEndian.PutUint64(timestamp[:], uint64(r.Timestamp))
+	out.Write(timestamp[:])
+
 	var length [4]byte
+
 	binary.BigEndian.PutUint32(length[:], uint32(len(keyBytes)))
 	out.Write(length[:])
 	out.Write(keyBytes)
+
 	if r.Tombstone {
 		out.WriteByte(1)
 	} else {
 		out.WriteByte(0)
 	}
+
 	binary.BigEndian.PutUint32(length[:], uint32(len(valueBytes)))
 	out.Write(length[:])
 	out.Write(valueBytes)
+
 	return out.Bytes()
 }
 func parseRecords(block []byte) ([]Record, error) {
 	var records []Record
+
 	for i := 0; i < len(block); {
+		if i+8 > len(block) {
+			break
+		}
+
+		timestamp := int64(binary.BigEndian.Uint64(block[i : i+8]))
+		i += 8
+
 		if i+4 > len(block) {
 			break
 		}
+
 		keyLen := int(binary.BigEndian.Uint32(block[i : i+4]))
 		i += 4
+
 		if keyLen == 0 {
 			break
 		}
+
 		if i+keyLen > len(block) {
 			break
 		}
+
 		key := string(block[i : i+keyLen])
 		i += keyLen
+
 		if i >= len(block) {
 			break
 		}
+
 		tombstone := block[i] == 1
 		i++
+
 		if i+4 > len(block) {
 			break
 		}
+
 		valueLen := int(binary.BigEndian.Uint32(block[i : i+4]))
 		i += 4
+
 		if i+valueLen > len(block) {
 			break
 		}
+
 		value := append([]byte(nil), block[i:i+valueLen]...)
 		i += valueLen
-		records = append(records, Record{Key: key, Value: value, Tombstone: tombstone})
+
+		records = append(records, Record{
+			Key:       key,
+			Value:     value,
+			Timestamp: timestamp,
+			Tombstone: tombstone,
+		})
 	}
+
 	return records, nil
 }

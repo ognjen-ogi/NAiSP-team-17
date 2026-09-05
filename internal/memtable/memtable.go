@@ -1,6 +1,9 @@
 package memtable
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 type SizeLimitType string
 
@@ -11,6 +14,7 @@ const (
 
 type entry struct {
 	value     []byte
+	timestamp int64
 	tombstone bool
 }
 
@@ -87,20 +91,38 @@ func NewMemtable(sizeLimitType SizeLimitType, sizeLimit int, structureType Struc
 }
 
 func (m *Memtable) Put(key string, value []byte) {
+	m.PutWithTimestamp(key, value, time.Now().UnixNano())
+}
+
+func (m *Memtable) PutWithTimestamp(key string, value []byte, timestamp int64) {
 	if old, found := m.store.get(key); found {
-		m.currentBytes -= len(key) + len(old.value)
+		m.currentBytes -= len(key) + len(old.value) + 9
 	}
 
-	m.store.put(key, entry{value: value, tombstone: false})
-	m.currentBytes += len(key) + len(value)
+	m.store.put(key, entry{
+		value:     value,
+		timestamp: timestamp,
+		tombstone: false,
+	})
+
+	m.currentBytes += len(key) + len(value) + 9
 }
 func (m *Memtable) Delete(key string) {
+	m.DeleteWithTimestamp(key, time.Now().UnixNano())
+}
+
+func (m *Memtable) DeleteWithTimestamp(key string, timestamp int64) {
 	if old, found := m.store.get(key); found {
-		m.currentBytes -= len(key) + len(old.value)
+		m.currentBytes -= len(key) + len(old.value) + 9
 	}
 
-	m.store.put(key, entry{value: nil, tombstone: true})
-	m.currentBytes += len(key) // tombstone zapis i dalje zauzima mesto za kljuc
+	m.store.put(key, entry{
+		value:     nil,
+		timestamp: timestamp,
+		tombstone: true,
+	})
+
+	m.currentBytes += len(key) + 9
 }
 
 func (m *Memtable) Get(key string) (value []byte, tombstone bool, found bool) {
@@ -124,6 +146,7 @@ func (m *Memtable) IsFull() bool {
 type FlushRecord struct {
 	Key       string
 	Value     []byte
+	Timestamp int64
 	Tombstone bool
 }
 
@@ -136,6 +159,7 @@ func (m *Memtable) Flush() []FlushRecord {
 		records = append(records, FlushRecord{
 			Key:       key,
 			Value:     e.value,
+			Timestamp: e.timestamp,
 			Tombstone: e.tombstone,
 		})
 	}
