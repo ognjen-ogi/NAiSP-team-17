@@ -1,0 +1,246 @@
+package engine
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	sstable "github.com/ognjen-ogi/NAiSP-team-17/internal/SSTable"
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/cache"
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/config"
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/memtable"
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockcache"
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/storage/blockmanager"
+	"github.com/ognjen-ogi/NAiSP-team-17/internal/wal"
+)
+
+const (
+	walDirectory     = "data/wal"
+	sstableDirectory = "data/sstables"
+)
+
+type Engine struct {
+	config            config.Config
+	wal               *wal.WAL
+	memtable          *memtable.Memtable
+	cache             *cache.ResultCache
+	blockCache        *blockcache.BlockCache
+	blockManager      *blockmanager.BlockManager
+	sstables          []*sstable.SSTable
+	nextSSTableNumber int
+	lastWALPosition   wal.Position
+}
+
+type numberedSSTable struct {
+	number int
+	table  *sstable.SSTable
+}
+
+func New(configPath string) (*Engine, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("neuspesno ucitavanje konfiguracije: %w", err)
+	}
+
+	if err := os.MkdirAll(sstableDirectory, 0755); err != nil {
+		return nil, fmt.Errorf("neuspesno kreiranje SSTable direktorijuma: %w", err)
+	}
+
+	blockCacheInstance := blockcache.NewBlockCache(cfg.BlockCache.Capacity)
+
+	blockManagerInstance := blockmanager.NewBlockManager(
+		cfg.BlockManager.BlockSize,
+		blockCacheInstance,
+	)
+
+	walInstance, err := wal.NewWAL(
+		walDirectory,
+		blockManagerInstance,
+		cfg.BlockManager.BlockSize,
+		cfg.WAL.SegmentBlockCount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("neuspesno kreiranje WAL-a: %w", err)
+	}
+
+	memtableInstance := memtable.NewMemtable(
+		memtable.SizeLimitType(cfg.Memtable.SizeLimitType),
+		cfg.Memtable.SizeLimit,
+		memtable.StructureType(cfg.Memtable.Structure),
+	)
+
+	cacheInstance := cache.NewResultCache(cfg.Cache.Capacity)
+
+	engine := &Engine{
+		config:            cfg,
+		wal:               walInstance,
+		memtable:          memtableInstance,
+		cache:             cacheInstance,
+		blockCache:        blockCacheInstance,
+		blockManager:      blockManagerInstance,
+		sstables:          make([]*sstable.SSTable, 0),
+		nextSSTableNumber: 1,
+	}
+
+	if err := engine.loadSSTables(); err != nil {
+		return nil, err
+	}
+
+	return engine, nil
+}
+
+func (e *Engine) Put(key string, value []byte) error {
+	record := wal.Record{
+		Timestamp: time.Now().UnixNano(),
+		Tombstone: false,
+		Key:       key,
+		Value:     value,
+	}
+
+	position, err := e.wal.Append(record)
+	if err != nil {
+		return fmt.Errorf("neuspesan upis u WAL: %w", err)
+	}
+
+	e.memtable.Put(key, value)
+	e.cache.Invalidate(key)
+	e.lastWALPosition = position
+
+	if e.memtable.IsFull() {
+		if err := e.flushMemtable(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (e *Engine) Delete(key string) error {
+	record := wal.Record{
+		Timestamp: time.Now().UnixNano(),
+		Tombstone: true,
+		Key:       key,
+		Value:     nil,
+	}
+
+	position, err := e.wal.Append(record)
+	if err != nil {
+		return fmt.Errorf("neuspesan upis brisanja u WAL: %w", err)
+	}
+
+	e.memtable.Delete(key)
+	e.cache.Invalidate(key)
+	e.lastWALPosition = position
+
+	if e.memtable.IsFull() {
+		if err := e.flushMemtable(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (e *Engine) flushMemtable() error {
+	records := e.memtable.Flush()
+	if len(records) == 0 {
+		return nil
+	}
+
+	path := filepath.Join(
+		sstableDirectory,
+		fmt.Sprintf("sstable_%04d.db", e.nextSSTableNumber),
+	)
+
+	table := sstable.NewSSTable(
+		path,
+		e.config.BlockManager.BlockSize,
+		e.blockCache,
+	)
+
+	if err := table.WriteRecords(records); err != nil {
+		return fmt.Errorf("neuspesan flush Memtable-a u SSTable: %w", err)
+	}
+
+	e.sstables = append(e.sstables, table)
+	e.nextSSTableNumber++
+
+	e.memtable = memtable.NewMemtable(
+		memtable.SizeLimitType(e.config.Memtable.SizeLimitType),
+		e.config.Memtable.SizeLimit,
+		memtable.StructureType(e.config.Memtable.Structure),
+	)
+
+	if e.lastWALPosition.SegmentNumber > 0 {
+		if err := e.wal.DeleteSegmentsBefore(e.lastWALPosition); err != nil {
+			return fmt.Errorf("neuspesno ciscenje WAL segmenata: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (e *Engine) loadSSTables() error {
+	entries, err := os.ReadDir(sstableDirectory)
+	if err != nil {
+		return fmt.Errorf("neuspesno citanje SSTable direktorijuma: %w", err)
+	}
+
+	tables := make([]numberedSSTable, 0)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+
+		if !strings.HasPrefix(name, "sstable_") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+
+		numberText := strings.TrimSuffix(
+			strings.TrimPrefix(name, "sstable_"),
+			".db",
+		)
+
+		number, err := strconv.Atoi(numberText)
+		if err != nil {
+			continue
+		}
+
+		path := filepath.Join(sstableDirectory, name)
+
+		table, err := sstable.Open(
+			path,
+			e.config.BlockManager.BlockSize,
+			e.blockCache,
+		)
+		if err != nil {
+			return fmt.Errorf("neuspesno otvaranje SSTable %s: %w", name, err)
+		}
+
+		tables = append(tables, numberedSSTable{
+			number: number,
+			table:  table,
+		})
+	}
+
+	sort.Slice(tables, func(i, j int) bool {
+		return tables[i].number < tables[j].number
+	})
+
+	for _, table := range tables {
+		e.sstables = append(e.sstables, table.table)
+
+		if table.number >= e.nextSSTableNumber {
+			e.nextSSTableNumber = table.number + 1
+		}
+	}
+
+	return nil
+}
