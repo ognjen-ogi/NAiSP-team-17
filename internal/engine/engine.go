@@ -410,3 +410,11 @@ func (e *Engine) PrintState() {
 	fmt.Println("=====================================")
 	fmt.Println()
 }
+
+func (e *Engine) ValidateSSTable(number int) (sstable.MerkleValidation, error) {
+	if number < 1 || number > len(e.sstables) {
+		return sstable.MerkleValidation{}, fmt.Errorf("SSTable broj %d ne postoji", number)
+	}
+
+	return e.sstables[number-1].ValidateMerkle()
+}
