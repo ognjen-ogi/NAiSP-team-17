@@ -226,6 +226,7 @@ func (s *SSTable) Get(key string) ([]byte, bool, bool, error) {
 		if errors.Is(err, errLegacyTable) {
 			return s.getLegacy(key)
 		}
+
 		return nil, false, false, err
 	}
 
@@ -238,24 +239,13 @@ func (s *SSTable) Get(key string) ([]byte, bool, bool, error) {
 		return nil, false, false, nil
 	}
 
-	summary, err := s.readSummary(h)
+	startOffset, possible, err := s.findSummaryIndexOffset(h, key)
 	if err != nil {
 		return nil, false, false, err
 	}
 
-	if len(summary) > 0 && (key < summary[0].Key || key > summary[len(summary)-1].Key) {
+	if !possible {
 		return nil, false, false, nil
-	}
-
-	startOffset := uint64(0)
-
-	for _, entry := range summary {
-		if entry.Key <= key {
-			startOffset = entry.IndexOffset
-			continue
-		}
-
-		break
 	}
 
 	indexEntry, found, err := s.findIndexEntry(h, key, startOffset)
@@ -371,13 +361,6 @@ func (s *SSTable) readBloom(h tableHeader) (BloomFilter, error) {
 	}
 	return deserializeBloom(data)
 }
-func (s *SSTable) readSummary(h tableHeader) ([]SummaryEntry, error) {
-	data, err := s.readSection(h.SummaryStart, h.SummaryLength)
-	if err != nil {
-		return nil, err
-	}
-	return deserializeSummary(data)
-}
 
 func (s *SSTable) readRecord(h tableHeader, offset uint64) (Record, error) {
 	lengthBytes, err := s.readAt(h.DataStart, h.DataLength, offset, 4)
@@ -394,6 +377,87 @@ func (s *SSTable) readRecord(h tableHeader, offset uint64) (Record, error) {
 		return Record{}, errors.New("neispravan Data zapis")
 	}
 	return records[0], nil
+}
+
+func (s *SSTable) readSummaryEntry(h tableHeader, offset uint64) (SummaryEntry, uint64, error) {
+	if offset >= h.SummaryLength {
+		return SummaryEntry{}, 0, errors.New("Summary offset je van opsega")
+	}
+
+	lengthBytes, err := s.readAt(
+		h.SummaryStart,
+		h.SummaryLength,
+		offset,
+		4,
+	)
+	if err != nil {
+		return SummaryEntry{}, 0, err
+	}
+
+	keyLength := uint64(binary.BigEndian.Uint32(lengthBytes))
+	entryLength := uint64(4) + keyLength + 8
+
+	if offset+entryLength > h.SummaryLength {
+		return SummaryEntry{}, 0, errors.New("neispravan Summary zapis")
+	}
+
+	keyBytes, err := s.readAt(
+		h.SummaryStart,
+		h.SummaryLength,
+		offset+4,
+		keyLength,
+	)
+	if err != nil {
+		return SummaryEntry{}, 0, err
+	}
+
+	indexOffsetBytes, err := s.readAt(
+		h.SummaryStart,
+		h.SummaryLength,
+		offset+4+keyLength,
+		8,
+	)
+	if err != nil {
+		return SummaryEntry{}, 0, err
+	}
+
+	entry := SummaryEntry{
+		Key:         string(keyBytes),
+		IndexOffset: binary.BigEndian.Uint64(indexOffsetBytes),
+	}
+
+	return entry, offset + entryLength, nil
+}
+
+func (s *SSTable) findSummaryIndexOffset(h tableHeader, key string) (uint64, bool, error) {
+	if h.SummaryLength == 0 {
+		return 0, true, nil
+	}
+
+	offset := uint64(0)
+	indexOffset := uint64(0)
+	first := true
+
+	for offset < h.SummaryLength {
+		entry, nextOffset, err := s.readSummaryEntry(h, offset)
+		if err != nil {
+			return 0, false, err
+		}
+
+		if first && key < entry.Key {
+			return 0, false, nil
+		}
+
+		if entry.Key > key {
+			return indexOffset, true, nil
+		}
+
+		indexOffset = entry.IndexOffset
+		first = false
+		offset = nextOffset
+	}
+
+	return indexOffset, true, nil
 }
 
 func (s *SSTable) readIndexEntry(h tableHeader, offset uint64) (IndexEntry, uint64, error) {
@@ -756,21 +820,7 @@ func serializeSummary(entries []IndexEntry, degree int) ([]byte, error) {
 
 	return out.Bytes(), nil
 }
-func deserializeSummary(data []byte) ([]SummaryEntry, error) {
-	var result []SummaryEntry
-	for len(data) > 0 {
-		key, rest, err := readString(data)
-		if err != nil {
-			return nil, err
-		}
-		if len(rest) < 8 {
-			return nil, errors.New("neispravan Summary")
-		}
-		result = append(result, SummaryEntry{Key: key, IndexOffset: binary.BigEndian.Uint64(rest[:8])})
-		data = rest[8:]
-	}
-	return result, nil
-}
+
 func writeString(out *bytes.Buffer, value string) error {
 	if uint64(len(value)) > uint64(^uint32(0)) {
 		return errors.New("string je predugacak")
